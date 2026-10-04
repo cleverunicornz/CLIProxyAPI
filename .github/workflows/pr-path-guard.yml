@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   ensure-no-translator-changes:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: {group: ci, labels: automation-test-s}
     steps:
       - uses: actions/checkout@v4
