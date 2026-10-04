@@ -8,6 +8,11 @@ release. Pinning that release keeps the cache fix isolated from unrelated
 changes on upstream main. Updating this baseline is a separate decision.
 
 Internal changes use `internal/*` pull requests and merge commits.
+Both trunks have branch protection with administrator enforcement, no force
+pushes and no deletion. `internal/main` requires a pull request and the `build`
+check against an up-to-date base, with zero required human approvals. `main`
+requires a pull request with one maintainer approval. Organization rulesets
+also require merge commits and prevent deletion and force pushes.
 Upstream contributions use code-only `upstream/*` branches cut from `main`;
 advancing `main` or opening the upstream contribution needs maintainer review.
 Fork CI changes and this document stay in separate commits from code.
