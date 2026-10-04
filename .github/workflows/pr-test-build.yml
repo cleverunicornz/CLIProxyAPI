@@ -2,24 +2,50 @@ name: pr-test-build
 
 on:
   pull_request:
+    branches: [internal/main]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: {group: ci, labels: automation-test-s}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Build
+      - name: Prove test-first retention failures
+        shell: bash
         run: |
-          go build -o test-output ./cmd/server
-          rm -f test-output
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/cache-before"
+          git worktree add --detach "$before_dir" 313e5c210ddd992f3c5640dd43d2f860c5d167dc
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./sdk/api/handlers/openai -run '^TestDefaultWebsocketToolCaches' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/cache-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q 'session idle for more than one hour still retains' "$RUNNER_TEMP/cache-before.log"
+          grep -q 'retained 100688256 payload bytes' "$RUNNER_TEMP/cache-before.log"
+          grep -q 'retained 100694016 payload bytes' "$RUNNER_TEMP/cache-before.log"
+      - name: Check formatting
+        shell: bash
+        run: |
+          test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
+          git diff --check
+      - name: Verify fixed retention and handler compatibility
+        run: |
+          go test -p 2 ./sdk/api/handlers/openai -run '^TestDefaultWebsocketToolCaches' -count=1 -v
+          go test -p 2 ./sdk/api/handlers/openai -count=1
+          go test -p 2 -race ./sdk/api/handlers/openai -count=1
+      - name: Build portable server
+        run: |
+          CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server
+          rm test-output
