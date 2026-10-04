@@ -32,3 +32,26 @@ refresh step is omitted so CI builds the pinned source bytes.
 The translator guard uses git rather than a third-party action; the inherited
 AGENTS guard moves to an organization runner after this initial PR lands.
 No image or binary publication or deployment pipeline is established here.
+
+## Public fork Actions controls
+
+On 2026-10-04 the fork's Actions contributor approval policy was set to
+`all_external_contributors` using the repository Actions settings API and
+read back with the same value. All outside contributors require approval
+before their fork pull request workflow code runs; maintainers inspect workflow
+changes before approving. This setting is independent of branch merge approval.
+
+| Workflow | Event | Runner | Execution boundary |
+| --- | --- | --- | --- |
+| `pr-test-build.yml` | `pull_request`, base `internal/main` | `ci` / `automation-test-s` | Executes the PR merge checkout with read-only contents permission. Never uses `pull_request_target`. Synthetic tests and compile only; no provider credentials. |
+| `pr-path-guard.yml` | `pull_request`, base `internal/main` | `ci` / `automation-test-s` | Checks out the PR merge and compares filenames with git. Never uses `pull_request_target`. SHAs enter through quoted environment variables. Read-only contents permission. |
+| `agents-md-guard.yml` | `pull_request_target` | `ci` / `automation-test-s` after this PR | Fixed base-branch GitHub API script lists changed filenames, tests AGENTS paths, and posts a comment/closes the PR if needed. No checkout, PR files, downloaded artifacts, shell commands, dynamic evaluation or PR-head execution. PR metadata is only data. Write permissions are limited to issues and pull requests. |
+| `auto-retarget-main-pr-to-dev.yml` | `pull_request_target`, base `main` | GitHub-hosted | Unmodified fixed API script; no checkout or PR-head execution. Does not target `internal/main`. |
+| `docker-image.yml` | tag push | GitHub-hosted | Unmodified upstream publication workflow; not triggered by this work and never moved to organization runners. |
+| `release.yaml` | tag push | GitHub-hosted platform matrix | Unmodified upstream publication workflow; not triggered by this work and never moved to organization runners. |
+
+The initial PR's AGENTS guard uses the inherited GitHub-hosted base version.
+No organization-runner workflow checks out or executes PR-head code under
+`pull_request_target`. Keep that boundary when adding future workflows.
+The test/fix commits remain separate from workflow and fork-documentation
+commits; upstream cherry-picks contain the test and fix only.
