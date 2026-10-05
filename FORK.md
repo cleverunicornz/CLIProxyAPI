@@ -34,7 +34,9 @@ AGENTS guard moves to an organization runner after this initial PR lands.
 No image or binary publication or deployment pipeline is established here.
 Since the v8.0.15 sync, the translator guard permits translator changes only
 when every changed path's blob is byte-identical to fork `main`, so upstream
-syncs pass and any fork-authored translator edit fails.
+syncs pass and any fork-authored translator edit fails. The AGENTS.md guard
+permits AGENTS.md changes under the same verbatim-from-`main` rule, so
+upstream syncs pass while local AGENTS.md edits are still closed.
 
 ## Public fork Actions controls
 
@@ -48,7 +50,7 @@ changes before approving. This setting is independent of branch merge approval.
 | --- | --- | --- | --- |
 | `pr-test-build.yml` | `pull_request`, base `internal/main` | `ci` / `automation-test-s` | Executes same-repository PR merge checkouts only, with read-only contents permission. Never uses `pull_request_target`. Synthetic tests and compile only; no provider credentials. |
 | `pr-path-guard.yml` | `pull_request`, base `internal/main` | `ci` / `automation-test-s` | Checks out same-repository PR merges only and compares changed `internal/translator` paths' blob identity against fork `main` with git. Never uses `pull_request_target`. SHAs enter through quoted environment variables. Read-only contents permission. |
-| `agents-md-guard.yml` | `pull_request_target` | `ci` / `automation-test-s` after this PR | Fixed base-branch GitHub API script lists changed filenames, tests AGENTS paths, and posts a comment/closes the PR if needed. No checkout, PR files, downloaded artifacts, shell commands, dynamic evaluation or PR-head execution. PR metadata is only data. Write permissions are limited to issues and pull requests. |
+| `agents-md-guard.yml` | `pull_request_target` | `ci` / `automation-test-s` after this PR | Fixed base-branch GitHub API script lists changed filenames, tests AGENTS paths, and passes AGENTS.md changes whose head blobs match fork `main` verbatim; other AGENTS.md changes get a comment and the PR is closed. No checkout, PR files, downloaded artifacts, shell commands, dynamic evaluation or PR-head execution. PR metadata is only data. Write permissions are limited to issues and pull requests. |
 | `auto-retarget-main-pr-to-dev.yml` | `pull_request_target`, base `main` | GitHub-hosted | Unmodified fixed API script; no checkout or PR-head execution. Does not target `internal/main`. |
 | `docker-image.yml` | tag push | GitHub-hosted | Unmodified upstream publication workflow; not triggered by this work and never moved to organization runners. |
 | `release.yaml` | tag push | GitHub-hosted platform matrix | Unmodified upstream publication workflow; not triggered by this work and never moved to organization runners. |
