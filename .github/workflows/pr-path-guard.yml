@@ -15,12 +15,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Detect restricted translator changes
+      - name: Detect translator changes not carried from upstream
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if test -n "$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- internal/translator/)"; then
-            echo 'Changes under internal/translator require upstream maintenance.'
-            exit 1
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- internal/translator/)
+          if ((${#changed[@]} == 0)); then
+            exit 0
           fi
+          # Translator changes are allowed only when carried verbatim from an
+          # upstream sync: each changed path's blob must match fork main, which
+          # advances only through upstream-sync pull requests.
+          bad=0
+          for f in "${changed[@]}"; do
+            head_blob=$(git rev-parse -q --verify "$HEAD_SHA:$f" || true)
+            main_blob=$(git rev-parse -q --verify "origin/main:$f" || true)
+            if test "$head_blob" != "$main_blob"; then
+              echo "::error file=$f::internal/translator content differs from fork main; carry it verbatim from an upstream sync or route the change upstream."
+              bad=1
+            fi
+          done
+          exit $bad
