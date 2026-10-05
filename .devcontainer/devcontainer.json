@@ -1,0 +1,13 @@
+{
+  "image": "ghcr.io/cleverunicornz/runner-images/interactive-workbench",
+  "features": {
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.26"
+    }
+  },
+  "customizations": {
+    "cvu": {
+      "caches": ["~/go/pkg/mod", "~/.cache/go-build"]
+    }
+  }
+}
