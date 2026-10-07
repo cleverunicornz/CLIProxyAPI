@@ -42,45 +42,78 @@ upstream syncs pass while local AGENTS.md edits are still closed.
 ## Releases
 
 The fork publishes its own GitHub releases from `internal/main` through
-`.github/workflows/internal-release.yml`. Upstream's `release.yaml` and
-`docker-image.yml` publish nothing here, even when a tag is pushed. A tag push
-runs the workflow files of the tagged commit, so the guard covers tags on
-commits that contain it; never tag an older commit.
+`.github/workflows/internal-release.yml`.
 
 Tags are `v<upstream version>-cvu.<n>`: the upstream release that
 `internal/main` is synced to, then a fork counter that starts at 1 for each
 upstream version and increases by one with every fork release on it. The first
 release is `v8.0.15-cvu.1`. A sync to a newer upstream release restarts the
-counter, for example `v8.0.16-cvu.1`. Tags are never reused or moved.
+counter, for example `v8.0.16-cvu.1`. Tags are never reused or moved. The
+workflow checks only the tag's form; the operator who dispatches it picks the
+upstream version `internal/main` is synced to and the next unused counter.
+
+Tags are created only by the `internal-release` workflow, never by hand: not
+with `git push`, the web interface, or `gh release create` on a new tag. A tag
+push runs the workflow files of the tagged commit. Upstream's `release.yaml`
+(any tag) and `docker-image.yml` (`v*` tags) publish nothing here on commits
+that contain this section, because their jobs run only in
+`router-for-me/CLIProxyAPI`. Every older commit still carries them without that
+guard, and `release.yaml` there has `contents: write`, so a tag pushed onto an
+older commit would start upstream's publication jobs on the fork.
 
 Each release contains:
 
 - `CLIProxyAPI_<version>_linux_amd64_no-plugin.tar.gz`, where `<version>` is
-  the tag without its leading `v`. It is built like upstream's no-plugin
-  archive: Go 1.26.4, `CGO_ENABLED=0`, `-buildvcs=false`, a statically linked
-  binary, the model catalog refreshed from `router-for-me/models`, and the
-  same archive files (`cli-proxy-api`, `LICENSE`, `README.md`, `README_CN.md`,
-  `config.example.yaml`). It does not support dynamic library plugins.
+  the tag without its leading `v`, with the same files as upstream's archive
+  (`cli-proxy-api`, `LICENSE`, `README.md`, `README_CN.md`,
+  `config.example.yaml`). The binary is built like upstream's no-plugin one:
+  Go 1.26.4, `CGO_ENABLED=0`, `-buildvcs=false`, statically linked, the same
+  `-ldflags`. It does not support dynamic library plugins.
 - `checksums.txt`, the SHA-256 of the archive in `sha256sum` format.
 
-The binary embeds the version, the short source commit and the UTC build
-date through the same `-ldflags` as upstream, and prints them on startup as
-`CLIProxyAPI Version: <version>, Commit: <commit>, BuiltAt: <date>`. The
-release notes state the full source commit and the model catalog commit.
+The archive is reproducible from its commit; `.github/scripts/internal-release-build.sh`
+builds and verifies it. Unlike upstream's release build:
 
-Every pull request into `internal/main` runs the build: it checks the archive
+- the embedded model catalogs are the files committed under
+  `internal/registry/models`; the build does not refresh them from
+  `router-for-me/models`, and refuses to run when a tracked file differs from
+  the commit;
+- the build date is the commit time (`SOURCE_DATE_EPOCH`), and `-trimpath`
+  keeps the build directory out of the binary;
+- the tarball has fixed modes, every mtime set to the commit time, numeric
+  owner `0:0`, a fixed member order and no extended headers, and gzip stores
+  no file name or timestamp.
+
+To rebuild a release, check out its commit and run
+`RELEASE_TAG=<tag> GO_VERSION=1.26.4 bash .github/scripts/internal-release-build.sh release`
+with Go 1.26.4 and GNU tar; `release/checksums.txt` matches the published one.
+
+The binary embeds the version, the first seven characters of the source
+commit and the build date, and prints them on startup as
+`CLIProxyAPI Version: <version>, Commit: <commit>, BuiltAt: <date>`. The
+release notes state the full source commit.
+
+Every pull request into `internal/main` from a branch of this repository runs
+the build twice, on two runners in two directories with separate build
+caches, and requires identical checksums. Each build checks the archive
 contents, that `checksums.txt` verifies the archive, that the binary has no
-dynamic interpreter, and that the binary prints the expected version, commit
-and build date. The archive is kept as the run's artifact; nothing is
-published.
+dynamic interpreter, and that it prints the expected version, commit and build
+date. The archive is kept as the run's artifact; nothing is published. A pull
+request from another repository's fork does not run the build (its jobs are
+skipped).
 
 To publish, run the `internal-release` workflow on `internal/main` with the
 input `release_tag`, for example
 `gh workflow run internal-release.yml --repo cleverunicornz/CLIProxyAPI --ref internal/main -f release_tag=v8.0.15-cvu.1`.
-The run refuses any other ref, a tag outside the scheme, and an existing tag.
-It repeats the build checks, verifies the checksums again, then creates the tag
-on the built commit and the release with both assets. A dispatch without
-`release_tag` only builds.
+The run refuses any other ref and a tag outside the scheme. Both builds and
+the checks above must pass. The publish job then creates the tag through the
+API on exactly the built commit; creating an existing tag fails, so of two
+concurrent publishes only one creates it, and publishes run one at a time.
+Any error while looking up or creating the tag stops the run. If the tag
+already exists, the run continues only when it points at the built commit and
+has no release yet (a retry after an interrupted publish); a tag on another
+commit, or an existing release, stops it. A dispatch without `release_tag`
+only builds.
 
 ## Public fork Actions controls
 
@@ -96,9 +129,9 @@ changes before approving. This setting is independent of branch merge approval.
 | `pr-path-guard.yml` | `pull_request`, base `internal/main` | `ci` / `automation-test-s` | Checks out same-repository PR merges only and compares changed `internal/translator` paths' blob identity against fork `main` with git. Never uses `pull_request_target`. SHAs enter through quoted environment variables. Read-only contents permission. |
 | `agents-md-guard.yml` | `pull_request_target` | `ci` / `automation-test-s` after this PR | Fixed base-branch GitHub API script lists changed filenames, tests AGENTS paths, and passes AGENTS.md changes whose head blobs match fork `main` verbatim; other AGENTS.md changes get a comment and the PR is closed. No checkout, PR files, downloaded artifacts, shell commands, dynamic evaluation or PR-head execution. PR metadata is only data. Write permissions are limited to issues and pull requests. |
 | `auto-retarget-main-pr-to-dev.yml` | `pull_request_target`, base `main` | GitHub-hosted | Unmodified fixed API script; no checkout or PR-head execution. Does not target `internal/main`. |
-| `docker-image.yml` | tag push | GitHub-hosted | Upstream publication workflow. Every job that does not depend on another runs only when the repository is `router-for-me/CLIProxyAPI`, so a tag on the fork publishes nothing. Never moved to organization runners. |
-| `release.yaml` | tag push | GitHub-hosted platform matrix | Upstream publication workflow under the same repository guard on `prepare-release` and `publish-checksums`; the build jobs need `prepare-release` and are skipped with it. Never moved to organization runners. |
-| `internal-release.yml` | `pull_request`, base `internal/main`; `workflow_dispatch` | `ci` / `build-native`, publish on `ci` / `automation-test-s` | Builds the release archive and its checksums with read-only contents permission; same-repository PR heads only. Only the publish job, which runs only on a dispatch with `release_tag`, has `contents: write`. See Releases. |
+| `docker-image.yml` | `v*` tag push | GitHub-hosted | Upstream publication workflow. Every job that does not depend on another runs only when the repository is `router-for-me/CLIProxyAPI`, so a tag on a commit with this guard publishes nothing; older commits lack it (see Releases). Never moved to organization runners. |
+| `release.yaml` | any tag push | GitHub-hosted platform matrix | Upstream publication workflow under the same repository guard on `prepare-release` and `publish-checksums`; the build jobs need `prepare-release` and are skipped with it. Older commits lack the guard (see Releases). Never moved to organization runners. |
+| `internal-release.yml` | `pull_request`, base `internal/main`; `workflow_dispatch` | `ci` / `build-native` for the two builds, `ci` / `automation-test-s` for the comparison, tag tests and publication | Builds the release archive twice and compares checksums, with read-only contents permission; same-repository PR heads only. Only the publish job, which runs only on a dispatch with `release_tag`, has `contents: write`. See Releases. |
 
 The initial PR's AGENTS guard uses the inherited GitHub-hosted base version.
 No organization-runner workflow checks out or executes PR-head code under
