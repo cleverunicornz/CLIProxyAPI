@@ -1,0 +1,216 @@
+name: internal-release
+
+# Builds the linux/amd64 no-plugin archive the way upstream's release.yaml
+# does, but reproducibly from the commit (see
+# .github/scripts/internal-release-build.sh). Pull requests into internal/main
+# run the build only; a second, independent build of the same commit must give
+# the same checksum. A manual dispatch from internal/main with release_tag set
+# also creates the tag on the built commit and publishes a GitHub release with
+# the archive and its checksums.txt. Nothing publishes on a pull request or a
+# push. Tag naming is documented in FORK.md.
+
+on:
+  pull_request:
+    branches: [internal/main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Publish a release from internal/main as v<upstream version>-cvu.<n> (empty to build only)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26.4'
+
+jobs:
+  release-build:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: {group: ci, labels: build-native}
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      commit: ${{ steps.build.outputs.commit }}
+      sha: ${{ steps.build.outputs.sha }}
+      build_date: ${{ steps.build.outputs.build_date }}
+      checksum: ${{ steps.build.outputs.checksum }}
+    steps:
+      - name: Check release request
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/internal/main ]]; then
+            echo "::error::releases publish from internal/main only, not $GITHUB_REF"
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-cvu\.[1-9][0-9]*$ ]]; then
+            echo "::error::release_tag must be v<upstream version>-cvu.<n>, for example v8.0.15-cvu.1"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check tag
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET_SHA: ${{ github.sha }}
+        shell: bash
+        run: bash .github/scripts/internal-release-tag.sh check
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build and verify archive
+        id: build
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: bash .github/scripts/internal-release-build.sh release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-no-plugin
+          path: release/
+          if-no-files-found: error
+
+  # The same build on another runner, in another directory, with a cold Go
+  # build cache.
+  release-rebuild:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: {group: ci, labels: build-native}
+    outputs:
+      sha: ${{ steps.build.outputs.sha }}
+      checksum: ${{ steps.build.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rebuild/source
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Rebuild and verify archive
+        id: build
+        working-directory: rebuild/source
+        env:
+          GOCACHE: ${{ runner.temp }}/rebuild-gocache
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: bash .github/scripts/internal-release-build.sh ../release
+
+  release-reproducible:
+    needs: [release-build, release-rebuild]
+    runs-on: {group: ci, labels: automation-test-s}
+    steps:
+      - name: Compare the two builds
+        env:
+          FIRST_SHA: ${{ needs.release-build.outputs.sha }}
+          SECOND_SHA: ${{ needs.release-rebuild.outputs.sha }}
+          FIRST: ${{ needs.release-build.outputs.checksum }}
+          SECOND: ${{ needs.release-rebuild.outputs.checksum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "build   $FIRST_SHA $FIRST"
+          echo "rebuild $SECOND_SHA $SECOND"
+          test "$FIRST_SHA" = "$GITHUB_SHA"
+          test "$SECOND_SHA" = "$GITHUB_SHA"
+          if [[ ! "$FIRST" =~ ^[0-9a-f]{64}$ || "$FIRST" != "$SECOND" ]]; then
+            echo "::error::the two builds of $GITHUB_SHA differ; the archive is not reproducible"
+            exit 1
+          fi
+
+  release-tag-tests:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: {group: ci, labels: automation-test-s}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Tools the publish job uses
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in curl jq gh sha256sum; do command -v "$tool"; done
+          gh --version | head -n 1
+      - name: Tag decision cases
+        shell: bash
+        run: bash .github/scripts/internal-release-tag-test.sh
+      - name: Unused tag reads as unused through the real API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v0.0.0-cvu.1
+          TARGET_SHA: ${{ github.sha }}
+        shell: bash
+        run: bash .github/scripts/internal-release-tag.sh check
+
+  release-publish:
+    needs: [release-build, release-reproducible, release-tag-tests]
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: {group: ci, labels: automation-test-s}
+    concurrency:
+      group: internal-release-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64-no-plugin
+          path: release
+      - name: Verify artifact
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ needs.release-build.outputs.version }}
+          BUILT_SHA: ${{ needs.release-build.outputs.sha }}
+          CHECKSUM: ${{ needs.release-build.outputs.checksum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/internal/main
+          test "$BUILT_SHA" = "$GITHUB_SHA"
+          test "$VERSION" = "${RELEASE_TAG#v}"
+          cd release
+          sha256sum --check --strict checksums.txt
+          test "$(cut -d ' ' -f 1 checksums.txt)" = "$CHECKSUM"
+      - name: Create tag on the built commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET_SHA: ${{ needs.release-build.outputs.sha }}
+        shell: bash
+        run: bash .github/scripts/internal-release-tag.sh claim
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ needs.release-build.outputs.version }}
+          COMMIT: ${{ needs.release-build.outputs.commit }}
+          BUILT_SHA: ${{ needs.release-build.outputs.sha }}
+          BUILD_DATE: ${{ needs.release-build.outputs.build_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          notes="$(mktemp)"
+          cat > "$notes" <<NOTES
+          Organization fork build of CLIProxyAPI from \`internal/main\` at ${BUILT_SHA}.
+
+          - \`CLIProxyAPI_${VERSION}_linux_amd64_no-plugin.tar.gz\`: linux/amd64, built without CGO the same way as upstream's no-plugin archive. It does not support dynamic library plugins.
+          - \`checksums.txt\`: SHA-256 of the archive; verify with \`sha256sum --check checksums.txt\`.
+
+          The binary reports \`CLIProxyAPI Version: ${VERSION}, Commit: ${COMMIT}, BuiltAt: ${BUILD_DATE}\`; the build date is the commit time.
+          The embedded model catalogs are the files committed under \`internal/registry/models\` at ${BUILT_SHA}. Upstream's release build refreshes them from router-for-me/models at build time; this build does not.
+          The archive is reproducible: with Go ${GO_VERSION}, \`RELEASE_TAG=${RELEASE_TAG} GO_VERSION=${GO_VERSION} bash .github/scripts/internal-release-build.sh release\` at ${BUILT_SHA} rebuilds it byte for byte. Fork changes and the tag scheme are described in FORK.md.
+          NOTES
+          gh release create "$RELEASE_TAG" CLIProxyAPI_*.tar.gz checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --notes-file "$notes"
