@@ -59,8 +59,18 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	// Initialize Claude auth service
 	anthropicAuth := newClaudeAuth(h.cfg)
 
-	// Generate authorization URL (then override redirect_uri to reuse server port)
-	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
+	// Only the web UI starts a local forwarder that can catch the localhost
+	// redirect. Other management logins send the browser to Anthropic's code
+	// page and paste code#state back through oauth-callback. The exchange
+	// below must use the same redirect URI.
+	isWebUI := isWebUIRequest(c)
+	redirectURI := claude.ManualRedirectURI
+	if isWebUI {
+		redirectURI = claude.RedirectURI
+	}
+
+	// Generate authorization URL
+	authURL, state, err := anthropicAuth.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -69,7 +79,6 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "anthropic")
 
-	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/anthropic/callback")
@@ -143,7 +152,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		code := strings.Split(rawCode, "#")[0]
 
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
+		bundle, errExchange := anthropicAuth.ExchangeCodeForTokensWithRedirect(ctx, code, state, pkceCodes, redirectURI)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
