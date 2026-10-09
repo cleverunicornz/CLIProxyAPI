@@ -212,6 +212,12 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 	}
 }
 
+// NewClaudeAuthWithHTTPClient creates an Anthropic authentication service that
+// sends its OAuth requests through httpClient.
+func NewClaudeAuthWithHTTPClient(httpClient *http.Client) *ClaudeAuth {
+	return &ClaudeAuth{httpClient: httpClient}
+}
+
 func applyClaudeOAuthAxiosHeaders(req *http.Request) {
 	if req == nil {
 		return
