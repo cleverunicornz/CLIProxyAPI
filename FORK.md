@@ -50,6 +50,31 @@ AGENTS.md changes byte-identical to fork `main`, is never run, and merging into
 `internal/main`, so the queued run does not block merges, and at present no
 check closes a pull request that edits AGENTS.md.
 
+## Claude logins through the management API
+
+Fork-only, approved by the operator on 2026-10-09. A Claude login started with
+`GET /v0/management/anthropic-auth-url` without `is_webui` uses Anthropic's
+code page, `https://platform.claude.com/oauth/code/callback`, as its
+`redirect_uri`. Upstream sends it to `http://localhost:54545/callback`, where
+nothing listens when the proxy runs in the cluster. After sign-in the page
+shows `code#state`. The v2 dashboard splits that and posts
+`{provider: "anthropic", state, code}` to `POST /v0/management/oauth-callback`.
+The session's code exchange sends the same `redirect_uri` and the session
+state. A state with no pending session is refused before any exchange.
+
+This is what Claude Code itself does on a remote machine. Read from
+`@anthropic-ai/claude-code-linux-x64@2.1.295` on 2026-10-09: its
+`MANUAL_REDIRECT_URL`, the same `CLIENT_ID` and `TOKEN_URL` as this fork, and
+the same `redirect_uri` choice in the authorize URL and the token exchange.
+
+The login with `is_webui=true`, which starts the local forwarder on 54545, and
+the CLI login (`-claude-login`) keep the localhost redirect. The one decision
+is in `RequestAnthropicToken`; `claude.GenerateAuthURL` and
+`ExchangeCodeForTokens` are unchanged, and their `...WithRedirect` variants take
+the redirect URI. Pull request CI proves the tests fail at the test-first commit
+`04bc849836b5b2557630126e7204599abeb57c12`, then runs them, the Claude auth,
+management handler and SDK auth packages, and the race checks.
+
 ## Releases
 
 The fork publishes its own GitHub releases from `internal/main` through

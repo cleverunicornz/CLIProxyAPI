@@ -40,6 +40,11 @@ const (
 	claudeRefreshHandshakeTimeout = 10 * time.Second
 )
 
+// ManualRedirectURI is Anthropic's code-display page, which shows the
+// authorization code as code#state for the user to paste back. Claude Code
+// uses it when nothing local can catch the redirect.
+const ManualRedirectURI = "https://platform.claude.com/oauth/code/callback"
+
 var (
 	claudeRefreshGroup singleflight.Group
 	claudeRefreshMu    sync.Mutex
@@ -212,6 +217,12 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 	}
 }
 
+// NewClaudeAuthWithHTTPClient creates an Anthropic authentication service that
+// sends its OAuth requests through httpClient.
+func NewClaudeAuthWithHTTPClient(httpClient *http.Client) *ClaudeAuth {
+	return &ClaudeAuth{httpClient: httpClient}
+}
+
 func applyClaudeOAuthAxiosHeaders(req *http.Request) {
 	if req == nil {
 		return
@@ -321,6 +332,12 @@ func (o *ClaudeAuth) inspectOAuthAccount(ctx context.Context, accessToken string
 //   - string: The state parameter for verification
 //   - error: An error if PKCE codes are missing or URL generation fails
 func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+	return o.GenerateAuthURLWithRedirect(state, pkceCodes, RedirectURI)
+}
+
+// GenerateAuthURLWithRedirect creates the OAuth authorization URL with PKCE
+// for the given redirect URI. The code exchange must use the same redirect URI.
+func (o *ClaudeAuth) GenerateAuthURLWithRedirect(state string, pkceCodes *PKCECodes, redirectURI string) (string, string, error) {
 	if pkceCodes == nil {
 		return "", "", fmt.Errorf("PKCE codes are required")
 	}
@@ -329,7 +346,7 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		"code":                  {"true"},
 		"client_id":             {ClientID},
 		"response_type":         {"code"},
-		"redirect_uri":          {RedirectURI},
+		"redirect_uri":          {redirectURI},
 		"scope":                 {ClaudeOAuthScope},
 		"code_challenge":        {pkceCodes.CodeChallenge},
 		"code_challenge_method": {"S256"},
@@ -372,6 +389,12 @@ func (c *ClaudeAuth) parseCodeAndState(code string) (parsedCode, parsedState str
 //   - *ClaudeAuthBundle: The complete authentication bundle with tokens
 //   - error: An error if token exchange fails
 func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+	return o.ExchangeCodeForTokensWithRedirect(ctx, code, state, pkceCodes, RedirectURI)
+}
+
+// ExchangeCodeForTokensWithRedirect exchanges an authorization code for tokens
+// using the redirect URI the authorization URL was generated with.
+func (o *ClaudeAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code, state string, pkceCodes *PKCECodes, redirectURI string) (*ClaudeAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}
@@ -383,7 +406,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	reqBody := authorizationCodeExchangeRequest{
 		GrantType:    "authorization_code",
 		Code:         newCode,
-		RedirectURI:  RedirectURI,
+		RedirectURI:  redirectURI,
 		ClientID:     ClientID,
 		CodeVerifier: pkceCodes.CodeVerifier,
 		State:        state,
