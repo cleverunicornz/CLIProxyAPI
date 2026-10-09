@@ -36,16 +36,38 @@ jobs:
           grep -q 'session idle for more than one hour still retains' "$RUNNER_TEMP/cache-before.log"
           grep -q 'retained 100688256 payload bytes' "$RUNNER_TEMP/cache-before.log"
           grep -q 'retained 100694016 payload bytes' "$RUNNER_TEMP/cache-before.log"
+      - name: Prove test-first Claude code-page failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/claude-before"
+          git worktree add --detach "$before_dir" 04bc849836b5b2557630126e7204599abeb57c12
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api/handlers/management -run 'Anthropic' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/claude-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q -- '--- FAIL: TestRequestAnthropicTokenUsesCodePageRedirect' "$RUNNER_TEMP/claude-before.log"
+          grep -q -- '--- FAIL: TestAnthropicCodePageCallbackCompletesSession' "$RUNNER_TEMP/claude-before.log"
+          grep -q 'token request redirect_uri = "http://localhost:54545/callback"' "$RUNNER_TEMP/claude-before.log"
+          grep -q -- '--- PASS: TestRequestAnthropicTokenWebUIKeepsLocalhostRedirect' "$RUNNER_TEMP/claude-before.log"
       - name: Check formatting
         shell: bash
         run: |
           test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
+          test -z "$(gofmt -l internal/auth/claude internal/api/handlers/management)"
           git diff --check
       - name: Verify fixed retention and handler compatibility
         run: |
           go test -p 2 ./sdk/api/handlers/openai -run '^TestDefaultWebsocketToolCaches' -count=1 -v
           go test -p 2 ./sdk/api/handlers/openai -count=1
           go test -p 2 -race ./sdk/api/handlers/openai -count=1
+      - name: Verify Claude login redirects
+        run: |
+          go test -p 2 ./internal/auth/claude ./internal/api/handlers/management -run 'KeepsLocalhostRedirect|Anthropic' -count=1 -v
+          go test -p 2 ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
+          go test -p 2 -race ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
       - name: Build portable server
         run: |
           CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server
