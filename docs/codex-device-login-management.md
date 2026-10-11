@@ -53,7 +53,7 @@ ignored.
   "url": "https://auth.openai.com/codex/device",
   "user_code": "ABCD-1234",
   "expires_in": 900,
-  "expires_at": "2026-10-11T12:15:00Z"
+  "expires_at": "2026-10-11T12:15:00.123456789Z"
 }
 ```
 
@@ -64,7 +64,7 @@ ignored.
 | `url` | The same value, for clients written against the xAI/Kimi device responses. |
 | `user_code` | The one-time code the operator enters on that page. Show it. Do not log or audit it. |
 | `expires_in` | Seconds until the login expires: 900 (15 minutes, the CLI's and OpenAI Codex CLI's limit). |
-| `expires_at` | The same instant, RFC 3339, UTC. |
+| `expires_at` | The exact instant the login expires, RFC 3339 in UTC with fractional seconds (Go's RFC3339Nano: up to nine digits, trailing zeros dropped). It is the instant the gateway enforces: at `expires_at` the login is already `expired`. Parse it as RFC 3339; do not assume a fixed width. |
 
 Errors:
 
@@ -89,7 +89,7 @@ Pending, waiting for the operator:
   "status": "pending",
   "verification_uri": "https://auth.openai.com/codex/device",
   "user_code": "ABCD-1234",
-  "expires_at": "2026-10-11T12:15:00Z"
+  "expires_at": "2026-10-11T12:15:00.123456789Z"
 }
 ```
 
@@ -99,7 +99,7 @@ Done, the auth is stored:
 {
   "state": "codex-device-…",
   "status": "done",
-  "expires_at": "2026-10-11T12:15:00Z",
+  "expires_at": "2026-10-11T12:15:00.123456789Z",
   "account": {
     "email": "operator@example.com",
     "plan_type": "pro",
@@ -118,7 +118,7 @@ Failed:
 {
   "state": "codex-device-…",
   "status": "failed",
-  "expires_at": "2026-10-11T12:15:00Z",
+  "expires_at": "2026-10-11T12:15:00.123456789Z",
   "error": "provider_rejected",
   "message": "OpenAI ended the device login with status 400"
 }
@@ -130,7 +130,7 @@ Expired:
 {
   "state": "codex-device-…",
   "status": "expired",
-  "expires_at": "2026-10-11T12:15:00Z",
+  "expires_at": "2026-10-11T12:15:00.123456789Z",
   "error": "expired",
   "message": "The device code expired before the login was completed"
 }
@@ -142,7 +142,7 @@ Cancelled:
 {
   "state": "codex-device-…",
   "status": "cancelled",
-  "expires_at": "2026-10-11T12:15:00Z"
+  "expires_at": "2026-10-11T12:15:00.123456789Z"
 }
 ```
 
@@ -174,7 +174,8 @@ Errors:
 ### Retention
 
 A pending login stays pending until it finishes, is cancelled, or reaches
-`expires_at`, when it becomes `expired`. Expiry is exact: a request to OpenAI
+`expires_at`, when it becomes `expired`. Expiry is exact, at the published
+instant to the nanosecond: a request to OpenAI
 still in flight at `expires_at` is abandoned, a confirmation arriving after it
 is ignored and nothing is stored, and from `expires_at` on the status reads
 `expired` without the user code. A login whose confirmation arrived before
@@ -199,7 +200,7 @@ arrives:
 | Status when `DELETE` arrives | Answer | Status afterwards |
 |---|---|---|
 | `pending`, OpenAI not yet confirmed | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. The gateway stops polling OpenAI and stores nothing, even if OpenAI confirms later. |
-| `pending`, OpenAI confirmed before `expires_at` and the auth is being stored (a racing poll) | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. If the save completes anyway, the gateway removes the stored auth again; the login never becomes `done`. |
+| `pending`, OpenAI confirmed before `expires_at` and the auth is being stored (a racing poll) | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. If the save completes anyway, the gateway undoes that login's write and only it: it puts back the credential the write replaced (one another login of the same account committed meanwhile, else the one stored before), or removes the write if there was none. The login never becomes `done`. |
 | `pending` but `expires_at` has passed | `200 {"status": "ok", "cancelled": false}` | `expired` (no user code). |
 | `done` | `200 {"status": "ok", "cancelled": false}` | `done`; the stored auth stays. A cancel and a completion never both succeed: whichever the gateway records first wins. |
 | `expired`, `failed` or `cancelled` | `200 {"status": "ok", "cancelled": false}` | unchanged. |
@@ -207,7 +208,10 @@ arrives:
 | `state` missing or malformed | `400 {"status": "error", "error": "missing state"}` or `400 {"status": "error", "error": "invalid state"}` | — |
 
 `cancelled: true` is final: `GET` reports `cancelled` from that answer on and
-never changes again, and the account is not stored.
+never changes again, and the cancelled login's credential is not kept.
+Cancelling one login never removes or replaces a credential another login has
+committed: logins of the same account share one stored credential, and a
+`done` login's stays.
 
 ## Legacy status: `GET /v0/management/get-auth-status?state=<state>`
 
