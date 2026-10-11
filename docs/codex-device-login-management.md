@@ -191,18 +191,23 @@ operator's confirmation by that much plus the token exchange.
 
 ## Cancel: `DELETE /v0/management/oauth-session?state=<state>`
 
-The existing route, unchanged:
+The existing route. For a device login, `cancelled` is `true` exactly when the
+cancel took effect, so a client reports a login as cancelled only on
+`cancelled: true`. The answer depends on the login's status when the request
+arrives:
 
-- a pending login, including one whose auth is being stored:
-  `200 {"status": "ok", "cancelled": true}`. The gateway stops polling
-  OpenAI and keeps nothing, even if OpenAI confirms later or a save was
-  already under way (what it stored is removed again). Status then reports
-  `cancelled` and never changes.
-- a finished or unknown login: `200 {"status": "ok", "cancelled": false}`;
-  its status is unchanged. A login that reached `done` stays `done`: a cancel
-  and a completion never both succeed.
-- `400 {"status": "error", "error": "missing state"}` or
-  `400 {"status": "error", "error": "invalid state"}`.
+| Status when `DELETE` arrives | Answer | Status afterwards |
+|---|---|---|
+| `pending`, OpenAI not yet confirmed | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. The gateway stops polling OpenAI and stores nothing, even if OpenAI confirms later. |
+| `pending`, OpenAI confirmed before `expires_at` and the auth is being stored (a racing poll) | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. If the save completes anyway, the gateway removes the stored auth again; the login never becomes `done`. |
+| `pending` but `expires_at` has passed | `200 {"status": "ok", "cancelled": false}` | `expired` (no user code). |
+| `done` | `200 {"status": "ok", "cancelled": false}` | `done`; the stored auth stays. A cancel and a completion never both succeed: whichever the gateway records first wins. |
+| `expired`, `failed` or `cancelled` | `200 {"status": "ok", "cancelled": false}` | unchanged. |
+| no device login with this `state` (unknown, or forgotten after retention) | `200 {"status": "ok", "cancelled": false}` | `GET` answers `404 unknown_state`. |
+| `state` missing or malformed | `400 {"status": "error", "error": "missing state"}` or `400 {"status": "error", "error": "invalid state"}` | — |
+
+`cancelled: true` is final: `GET` reports `cancelled` from that answer on and
+never changes again, and the account is not stored.
 
 ## Legacy status: `GET /v0/management/get-auth-status?state=<state>`
 
