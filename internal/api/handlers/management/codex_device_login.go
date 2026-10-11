@@ -41,6 +41,10 @@ const (
 	codexDeviceExpiredMessage = "The device code expired before the login was completed"
 )
 
+// codexDeviceStagedHook, when set, is called with a login's credential once it
+// is ready to commit and before the commit decision; tests hold logins there.
+var codexDeviceStagedHook func(ctx context.Context, record *coreauth.Auth)
+
 // codexDeviceLoginOptions supplies the HTTP client and timings of a
 // management Codex device login; tests replace it.
 var codexDeviceLoginOptions = func(*config.Config) sdkAuth.CodexDeviceOptions {
@@ -376,6 +380,9 @@ func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop con
 	}
 	savedPath, errSave := h.saveTokenRecord(runCtx, record)
 	save.path = savedPath
+	if codexDeviceStagedHook != nil {
+		codexDeviceStagedHook(runCtx, record)
+	}
 	if errSave != nil {
 		message := "Failed to save authentication tokens"
 		if codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusFailed, nil, "save_failed", message) {

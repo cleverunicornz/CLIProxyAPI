@@ -1,5 +1,6 @@
-// Probes of validator a234 (CLIProxyAPI #9 at 32466e5d, round 2), kept verbatim
-// as regression tests: R2-1 (a234/G-1), R2-2 (a234/G-2), R2-3 (a234/G-3).
+// Probes of validator a234 (CLIProxyAPI #9 at 32466e5d, round 2), kept as
+// regression tests: R2-1 (a234/G-1), R2-2 (a234/G-2), R2-3 (a234/G-3). Verbatim
+// except TestA234CancelCannotDeleteAnotherCompletedLogin's hold point (round 3).
 package management
 
 import (
@@ -229,13 +230,17 @@ func TestA234CancelCannotDeleteAnotherCompletedLogin(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var hooks atomic.Int32
-	handler.postAuthPersistHook = func(context.Context, *coreauth.Auth) error {
+	// Adapted after round 3: the first login is held at the stage point (its
+	// credential ready, before its commit decision) rather than in
+	// postAuthPersistHook, the runtime registration that is part of the commit.
+	originalStaged := codexDeviceStagedHook
+	codexDeviceStagedHook = func(context.Context, *coreauth.Auth) {
 		if hooks.Add(1) == 1 {
 			close(entered)
 			<-release
 		}
-		return nil
 	}
+	t.Cleanup(func() { codexDeviceStagedHook = originalStaged })
 	router := gin.New()
 	g := router.Group("/v0/management", handler.Middleware())
 	g.POST("/codex-device-login", handler.StartCodexDeviceLogin)
