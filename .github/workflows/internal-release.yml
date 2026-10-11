@@ -18,6 +18,11 @@ on:
         description: Publish a release from internal/main as v<upstream version>-cvu.<n> (empty to build only)
         type: string
         required: false
+      prerelease:
+        description: Mark the published release as a prerelease (a candidate lane's build), so it never becomes the latest release
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -197,10 +202,15 @@ jobs:
           COMMIT: ${{ needs.release-build.outputs.commit }}
           BUILT_SHA: ${{ needs.release-build.outputs.sha }}
           BUILD_DATE: ${{ needs.release-build.outputs.build_date }}
+          PRERELEASE: ${{ inputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
           cd release
+          release_flags=()
+          if [ "$PRERELEASE" = "true" ]; then
+            release_flags=(--prerelease --latest=false)
+          fi
           notes="$(mktemp)"
           cat > "$notes" <<NOTES
           Organization fork build of CLIProxyAPI from \`internal/main\` at ${BUILT_SHA}.
@@ -213,4 +223,4 @@ jobs:
           The archive is reproducible: with Go ${GO_VERSION}, \`RELEASE_TAG=${RELEASE_TAG} GO_VERSION=${GO_VERSION} bash .github/scripts/internal-release-build.sh release\` at ${BUILT_SHA} rebuilds it byte for byte. Fork changes and the tag scheme are described in FORK.md.
           NOTES
           gh release create "$RELEASE_TAG" CLIProxyAPI_*.tar.gz checksums.txt \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --notes-file "$notes"
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG" --notes-file "$notes" "${release_flags[@]}"
