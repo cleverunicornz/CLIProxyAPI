@@ -252,7 +252,11 @@ func TestA249CancelExactlyAtCommit(t *testing.T) {
 		start := make(chan struct{})
 		done := make(chan struct{})
 		answer := make(chan bool, 1)
-		go func() { <-start; f.handler.commitCodexDeviceLogin(context.Background(), context.Background(), state, prepared); close(done) }()
+		go func() {
+			<-start
+			f.handler.commitCodexDeviceLogin(context.Background(), context.Background(), state, prepared)
+			close(done)
+		}()
 		go func() { <-start; b, _ := codexDeviceLogins.cancel(state); answer <- b }()
 		close(start)
 		accepted := <-answer
