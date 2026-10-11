@@ -104,11 +104,16 @@ other member. The gateway's ServiceAccount needs `create` on `tokenreviews` and
 `get` on pods in the session namespace.
 
 Nothing is cached. Every request is reviewed and its pod read again, and on a
-websocket, which authenticates once at the upgrade, every `response.create`
-frame is resolved again. A token the API server stops accepting, or a deleted
-or replaced pod, is refused at the gateway's next request or frame; a response
-already streaming when that happens runs to its end. The cost is one
-TokenReview and one pod read per request (two of each per websocket frame).
+websocket, which authenticates once at the upgrade, every frame that can start
+or continue a response is resolved again: in the handler's loop, and, with
+Codex response steering on (where the executor reads follow-up frames itself
+and writes them upstream), in the frame reader before either the executor or
+the handler sees the frame, so a refused frame is answered with the 403 error
+event and never forwarded. A token the API server stops accepting, or a
+deleted or replaced pod, is refused at the gateway's next request or frame; a
+response already streaming when that happens runs to its end. The cost is one
+TokenReview and one pod read per request (up to two of each per websocket
+frame).
 
 With the gate on, every refusal is a 403 made before any credential or
 upstream is used:
@@ -119,18 +124,28 @@ upstream is used:
   runs: a request without a session member, or whose model is not the
   member's model (case and a thinking suffix are ignored). The Responses
   websocket checks each frame before execution and answers an error event;
-- a body the gateway and a provider could read differently: it is read once at
-  its top level, as a strict JSON decoder does, and refused when it names the
-  model more than once (in any letter case or escaping) or not as a string
-  naming the member's model, or repeats any other top-level key;
+- a body the gateway and a provider could read differently. The client's own
+  body is checked on every route before any conversion (the route gate reads
+  it once, decoded from its `Content-Encoding`, and hands exactly that body to
+  the handler; legacy completions and a Responses-format chat body are
+  converted only afterwards), and each websocket frame likewise. It must be
+  one JSON object in which no object at any depth repeats a key (after
+  unescaping), so every reader of it (the gate, the image stripper,
+  translators, the provider) reads the same value of every field and what is
+  forwarded means exactly what was checked; at its top level it names the
+  model at most once in any letter case, as a string naming the member's
+  model;
 - a tool that runs another model: any tool in `tools` or `tool_choice` that
   names a model of its own, Anthropic's advisor tool (`advisor_*`), and a
   stored Responses `prompt` template. The Responses `image_generation` tool,
   which runs an image model, is stripped instead, because the Codex CLI sends
   it by default: with the gate on the effective `disable-image-generation`
   mode is `true`, so the payload finalizer removes it from `tools` and
-  `tool_choice` and the Codex executor never adds it. The other built-in tools
-  of the Responses and Messages APIs run on the request's model;
+  `tool_choice` (from an `allowed_tools` choice too, which is dropped when it
+  allows nothing else), drops a `"required"` or `{"type":"any"}` choice that no
+  remaining tool can satisfy, and the Codex executor never adds it. The other
+  built-in tools of the Responses and Messages APIs run on the request's
+  model;
 - in the auth manager, before any credential is picked: a member's model that
   an OAuth or API-key alias, a model pool or routing would run upstream as
   another model on any credential of the request's providers;
@@ -144,7 +159,11 @@ Pull request CI proves the gate tests fail at the test-first commit
 served), and the tests of the validator's findings (a216/W-5) fail at
 `df1698194d35801beccbb17435a67b68f1a74caf` (duplicate model fields served, an
 alias served, a stale identity served, 401 or 500 instead of 403, an injected
-image tool), while the gate-off control passes; then it runs them, the
+image tool), and the round-2 tests (a234/W-1) fail at
+`3526f7ffb6e7de70635c7382de40ef9ad57b2732` (duplex frames skip the gate with
+steering on, a nested duplicate tool type forwards the image tool, a stripped
+image tool leaves an unsatisfiable `tool_choice`, converted routes skip the
+strict check), while the gate-off control passes; then it runs them, the
 affected packages and race checks.
 
 ## Releases
