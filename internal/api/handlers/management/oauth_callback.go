@@ -26,7 +26,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 
 	var req oauthCallbackRequest
 	errBindJSON := c.ShouldBindJSON(&req)
-	if isCodexProviderName(c.Query("provider")) && !isPluginOAuthState(firstNonEmpty(c.Query("state"), req.State)) {
+	if isCodexProviderName(c.Query("provider")) && !isPluginOAuthState(firstNonEmpty(c.Query("state"), oauthCallbackState(req))) {
 		RespondCodexBrowserLoginRemoved(c)
 		return
 	}
@@ -164,6 +164,19 @@ func isCodexProviderName(provider string) bool {
 	return errNormalize == nil && normalized == "codex"
 }
 
+// oauthCallbackState is the state a callback carries, in any shape the
+// callback accepts: its state field, else the state inside its redirect_url.
+// It is read without validating either.
+func oauthCallbackState(req oauthCallbackRequest) string {
+	if state := strings.TrimSpace(req.State); state != "" {
+		return state
+	}
+	if u, errParse := url.Parse(strings.TrimSpace(req.RedirectURL)); errParse == nil {
+		return strings.TrimSpace(u.Query().Get("state"))
+	}
+	return ""
+}
+
 // isPluginOAuthState reports a known plugin login's state; a plugin keeps its
 // own provider name, openai included.
 func isPluginOAuthState(state string) bool {
@@ -176,13 +189,7 @@ func isPluginOAuthState(state string) bool {
 // Codex session, read from state or a pasted redirect_url without
 // validating either. Plugin sessions keep their own provider names.
 func isCodexBrowserCallback(req oauthCallbackRequest) bool {
-	state := strings.TrimSpace(req.State)
-	if state == "" {
-		if u, errParse := url.Parse(strings.TrimSpace(req.RedirectURL)); errParse == nil {
-			state = strings.TrimSpace(u.Query().Get("state"))
-		}
-	}
-	sessionProvider, _, isPlugin, _, _, known := GetOAuthSessionDetails(state)
+	sessionProvider, _, isPlugin, _, _, known := GetOAuthSessionDetails(oauthCallbackState(req))
 	if known && isPlugin {
 		return false
 	}

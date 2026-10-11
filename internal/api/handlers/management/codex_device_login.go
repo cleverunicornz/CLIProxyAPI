@@ -5,14 +5,12 @@ import (
 	"errors"
 	"math"
 	"net/http"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
@@ -35,14 +33,18 @@ const (
 	codexDeviceStatusExpired   = "expired"
 	codexDeviceStatusCancelled = "cancelled"
 	// codexDeviceStatusSaving is internal: OpenAI confirmed before expiry and
-	// the auth is being stored. It reads as pending.
+	// the credential is being staged in memory; a cancel still wins. It reads
+	// as pending.
 	codexDeviceStatusSaving = "saving"
+	// codexDeviceStatusCommitting is internal: the commit has begun and a
+	// cancel no longer wins. It reads as pending.
+	codexDeviceStatusCommitting = "committing"
 
 	codexDeviceExpiredMessage = "The device code expired before the login was completed"
 )
 
-// codexDeviceStagedHook, when set, is called with a login's credential once it
-// is ready to commit and before the commit decision; tests hold logins there.
+// codexDeviceStagedHook, when set, is called with a login's staged credential,
+// before its commit decision; tests hold logins there.
 var codexDeviceStagedHook func(ctx context.Context, record *coreauth.Auth)
 
 // codexDeviceLoginOptions supplies the HTTP client and timings of a
@@ -58,6 +60,7 @@ type codexDeviceAccount struct {
 }
 
 type codexDeviceLoginRecord struct {
+	state           string
 	status          string
 	verificationURI string
 	userCode        string
@@ -76,16 +79,21 @@ type codexDeviceLoginRecord struct {
 // is the one state machine of a login. Every transition is a compare-and-set
 // under its lock:
 //
-//	pending -> saving     beginSave, only before expiry
-//	pending -> expired    at expiry (also when read), or OpenAI's expired_token
-//	pending -> failed     OpenAI or the exchange ended the login
-//	pending -> cancelled  cancel
-//	saving  -> done       commit, after the auth is stored
-//	saving  -> failed     the store refused the auth
-//	saving  -> cancelled  cancel; the watcher then removes what the save stored
+//	pending    -> saving      beginSave, only before expiry
+//	pending    -> expired     at expiry (also when read), or OpenAI's expired_token
+//	pending    -> failed      OpenAI or the exchange ended the login
+//	pending    -> cancelled   cancel
+//	saving     -> cancelled   cancel; the staged credential is dropped
+//	saving     -> failed      the credential could not be prepared
+//	saving     -> committing  the commit begins; a cancel no longer wins
+//	committing -> done        the credential is stored
+//	committing -> failed      the store refused the credential
 //
-// A finished login never changes again, so a cancel and a commit cannot both
-// win, and nothing is saved past expiry or after an accepted cancel.
+// A login's credential is staged in memory until its commit and reaches the
+// token store only in the commit, so nothing of a pending, saving, cancelled,
+// expired or failed login is ever stored, and nothing is undone. A finished
+// login never changes again, and each finish also settles the login's legacy
+// OAuth session, whichever caller makes it.
 type codexDeviceLoginStore struct {
 	mu      sync.Mutex
 	now     func() time.Time
@@ -98,7 +106,11 @@ var codexDeviceLogins = &codexDeviceLoginStore{
 }
 
 func codexDeviceFinished(status string) bool {
-	return status != codexDeviceStatusPending && status != codexDeviceStatusSaving
+	switch status {
+	case codexDeviceStatusPending, codexDeviceStatusSaving, codexDeviceStatusCommitting:
+		return false
+	}
+	return true
 }
 
 func (s *codexDeviceLoginStore) purgeLocked() {
@@ -114,12 +126,15 @@ func (s *codexDeviceLoginStore) add(state string, record *codexDeviceLoginRecord
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeLocked()
+	record.state = state
 	s.records[state] = record
 }
 
-// transitionLocked moves record from one of from to status and reports
-// whether it did. A finished login hides its user code and stops its poller.
-func (s *codexDeviceLoginStore) transitionLocked(record *codexDeviceLoginRecord, from []string, status string, account *codexDeviceAccount, errorCode, message string) bool {
+// transitionLocked moves the login state from one of from to status and
+// reports whether it did. A finished login hides its user code, stops its
+// poller and settles its legacy OAuth session the same way, so
+// get-auth-status agrees with the device status whoever finished the login.
+func (s *codexDeviceLoginStore) transitionLocked(state string, record *codexDeviceLoginRecord, from []string, status string, account *codexDeviceAccount, errorCode, message string) bool {
 	if !slices.Contains(from, record.status) {
 		return false
 	}
@@ -134,6 +149,14 @@ func (s *codexDeviceLoginStore) transitionLocked(record *codexDeviceLoginRecord,
 		if record.stop != nil {
 			record.stop()
 		}
+		switch status {
+		case codexDeviceStatusDone:
+			CompleteOAuthSession(state)
+		case codexDeviceStatusCancelled:
+			CancelOAuthSession(state)
+		default:
+			SetOAuthSessionError(state, message)
+		}
 	}
 	return true
 }
@@ -142,13 +165,13 @@ func (s *codexDeviceLoginStore) transition(state string, from []string, status s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[state]
-	return ok && s.transitionLocked(record, from, status, account, errorCode, message)
+	return ok && s.transitionLocked(state, record, from, status, account, errorCode, message)
 }
 
 // expireLocked ends a pending login whose expiry has passed.
 func (s *codexDeviceLoginStore) expireLocked(record *codexDeviceLoginRecord) {
 	if record.status == codexDeviceStatusPending && !s.now().Before(record.expiresAt) {
-		s.transitionLocked(record, []string{codexDeviceStatusPending}, codexDeviceStatusExpired, nil, "expired", codexDeviceExpiredMessage)
+		s.transitionLocked(record.state, record, []string{codexDeviceStatusPending}, codexDeviceStatusExpired, nil, "expired", codexDeviceExpiredMessage)
 	}
 }
 
@@ -162,11 +185,12 @@ func (s *codexDeviceLoginStore) beginSave(state string) bool {
 		return false
 	}
 	s.expireLocked(record)
-	return s.transitionLocked(record, []string{codexDeviceStatusPending}, codexDeviceStatusSaving, nil, "", "")
+	return s.transitionLocked(state, record, []string{codexDeviceStatusPending}, codexDeviceStatusSaving, nil, "", "")
 }
 
-// cancel ends a pending or saving login; known reports whether state is a
-// device login at all.
+// cancel ends a pending or saving login, whose credential is at most staged;
+// a committing login's commit wins. known reports whether state is a device
+// login at all.
 func (s *codexDeviceLoginStore) cancel(state string) (accepted, known bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -175,7 +199,7 @@ func (s *codexDeviceLoginStore) cancel(state string) (accepted, known bool) {
 		return false, false
 	}
 	s.expireLocked(record)
-	return s.transitionLocked(record, []string{codexDeviceStatusPending, codexDeviceStatusSaving}, codexDeviceStatusCancelled, nil, "", ""), true
+	return s.transitionLocked(state, record, []string{codexDeviceStatusPending, codexDeviceStatusSaving}, codexDeviceStatusCancelled, nil, "", ""), true
 }
 
 func (s *codexDeviceLoginStore) get(state string) (codexDeviceLoginRecord, bool) {
@@ -201,90 +225,10 @@ func (s *codexDeviceLoginStore) watcherDone(state string) <-chan struct{} {
 	return nil
 }
 
-// codexDeviceCredentials orders what device logins do to their stored
-// credentials. Logins of the same account share one credential (its file
-// name comes from the account), so a cancelled login's rollback must not
-// remove, or leave its own stale write over, a credential another login has
-// committed meanwhile. Its lock serializes every commit and rollback;
-// committed holds, per credential name, the record last committed and when.
-var codexDeviceCredentials = struct {
-	mu        sync.Mutex
-	committed map[string]codexDeviceCommit
-}{committed: make(map[string]codexDeviceCommit)}
-
-type codexDeviceCommit struct {
-	record *coreauth.Auth
-	at     time.Time
-}
-
-func codexDeviceAccessToken(auth *coreauth.Auth) string {
-	if auth == nil {
-		return ""
-	}
-	if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
-		return storage.AccessToken
-	}
-	token, _ := auth.Metadata["access_token"].(string)
-	return token
-}
-
-// storedCodexDeviceCredential reads back what the store holds under record's
-// credential name: nil when it holds none; ok is false when the store could
-// not be read.
-func (h *Handler) storedCodexDeviceCredential(ctx context.Context, record *coreauth.Auth) (stored *coreauth.Auth, ok bool) {
-	store := h.tokenStoreWithBaseDir()
-	if store == nil {
-		return nil, false
-	}
-	auths, errList := store.List(ctx)
-	if errList != nil {
-		return nil, false
-	}
-	name := filepath.Base(record.FileName)
-	for _, auth := range auths {
-		if auth != nil && (filepath.Base(auth.FileName) == name || filepath.Base(auth.ID) == name) {
-			return auth, true
-		}
-	}
-	return nil, true
-}
-
-// codexDeviceSave is one device login's write of its credential: what the
-// store held under that name just before (previous), and when it began.
-type codexDeviceSave struct {
-	record   *coreauth.Auth
-	path     string
-	previous *coreauth.Auth
-	began    time.Time
-}
-
-// rollbackCodexDeviceSaveLocked undoes a cancelled login's save. It touches the
-// stored credential only while it is still this login's write, and puts back
-// what that write replaced: the credential another login committed after this
-// save began, else the credential stored before it, else nothing. Callers hold
-// codexDeviceCredentials.mu.
-func (h *Handler) rollbackCodexDeviceSaveLocked(ctx context.Context, state string, save codexDeviceSave) {
-	stored, ok := h.storedCodexDeviceCredential(ctx, save.record)
-	switch {
-	case !ok:
-		log.WithField("state", state).Warn("codex device login: could not read the stored auth back; the cancelled login's write is left in place")
-		return
-	case stored == nil || codexDeviceAccessToken(stored) != codexDeviceAccessToken(save.record):
-		// Gone already, or another login's credential now: not ours to undo.
-		return
-	}
-	restore := save.previous
-	if commit, found := codexDeviceCredentials.committed[filepath.Base(save.record.FileName)]; found && commit.at.After(save.began) {
-		restore = commit.record
-	}
-	if restore == nil {
-		h.rollbackSavedTokenRecords(ctx, []string{save.path})
-		return
-	}
-	if _, errSave := h.saveTokenRecord(ctx, restore); errSave != nil {
-		log.WithField("state", state).Error("codex device login: failed to put back the auth a cancelled login's write replaced")
-	}
-}
+// codexDeviceCommitMu serializes device-login commits: each stores its
+// credential and publishes done as one step, so of two logins of one
+// account (one stored credential) the one that commits last is stored.
+var codexDeviceCommitMu sync.Mutex
 
 // StartCodexDeviceLogin starts a Codex device login: POST
 // /v0/management/codex-device-login. The answer carries the verification URL
@@ -355,69 +299,72 @@ func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop con
 	if errComplete != nil {
 		if errors.Is(errComplete, context.Canceled) {
 			// Cancelled through oauth-session, ended elsewhere, or expired when
-			// its status was read.
+			// its status was read; the transition that ended it settled it.
 			codexDeviceLogins.transition(state, pending, codexDeviceStatusCancelled, nil, "", "")
-			if current, ok := codexDeviceLogins.get(state); ok && current.status == codexDeviceStatusExpired {
-				SetOAuthSessionError(state, codexDeviceExpiredMessage)
-			}
 			return
 		}
 		status, errorCode, message := classifyCodexDeviceError(errComplete)
 		if codexDeviceLogins.transition(state, pending, status, nil, errorCode, message) {
-			SetOAuthSessionError(state, message)
 			log.WithFields(log.Fields{"state": state, "error_code": errorCode}).Warn("codex device login ended without a login")
 		}
 		return
 	}
 
 	if !codexDeviceLogins.beginSave(state) {
-		// Cancelled or expired while OpenAI answered: nothing is saved.
+		// Cancelled or expired while OpenAI answered: nothing is staged.
 		return
 	}
-	save := codexDeviceSave{record: record, began: time.Now()}
-	if previous, ok := h.storedCodexDeviceCredential(ctx, record); ok {
-		save.previous = previous
-	}
-	savedPath, errSave := h.saveTokenRecord(runCtx, record)
-	save.path = savedPath
-	if codexDeviceStagedHook != nil {
+	saving := []string{codexDeviceStatusSaving}
+	// Stage: prepare the credential in memory. Nothing reaches the token store
+	// or the runtime before the commit.
+	prepared, errPrepare := h.prepareTokenRecord(runCtx, record)
+	if errPrepare == nil && codexDeviceStagedHook != nil {
 		codexDeviceStagedHook(runCtx, record)
 	}
-	if errSave != nil {
-		message := "Failed to save authentication tokens"
-		if codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusFailed, nil, "save_failed", message) {
-			SetOAuthSessionError(state, message)
-			log.WithField("state", state).Error("codex device login: failed to save the auth")
+	if errPrepare == nil && runCtx.Err() != nil {
+		errPrepare = runCtx.Err()
+	}
+	if errPrepare != nil {
+		if runCtx.Err() != nil {
+			// Cancelled, or its session ended elsewhere, while staging.
+			codexDeviceLogins.transition(state, saving, codexDeviceStatusCancelled, nil, "", "")
+			return
 		}
-		if savedPath != "" {
-			codexDeviceCredentials.mu.Lock()
-			h.rollbackCodexDeviceSaveLocked(ctx, state, save)
-			codexDeviceCredentials.mu.Unlock()
+		if codexDeviceLogins.transition(state, saving, codexDeviceStatusFailed, nil, "save_failed", "Failed to save authentication tokens") {
+			log.WithField("state", state).Error("codex device login: failed to prepare the auth")
 		}
 		return
 	}
+	h.commitCodexDeviceLogin(ctx, state, prepared)
+}
 
+// commitCodexDeviceLogin stores a staged credential and publishes done, as one
+// step under codexDeviceCommitMu: the login must still be saving (not
+// cancelled), the store must accept the credential, and done follows only
+// then. A refused store write ends the login failed with nothing stored.
+func (h *Handler) commitCodexDeviceLogin(ctx context.Context, state string, prepared *preparedTokenRecord) {
+	codexDeviceCommitMu.Lock()
+	defer codexDeviceCommitMu.Unlock()
+	if !codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusCommitting, nil, "", "") {
+		// Cancelled while staged: its credential is dropped, never stored.
+		return
+	}
+	committing := []string{codexDeviceStatusCommitting}
+	_, errPersist := h.persistTokenRecord(ctx, prepared)
+	if errPersist != nil && !errors.Is(errPersist, errStoredButNotRegistered) {
+		codexDeviceLogins.transition(state, committing, codexDeviceStatusFailed, nil, "save_failed", "Failed to save authentication tokens")
+		log.WithField("state", state).Error("codex device login: the token store refused the auth")
+		return
+	}
+	if errPersist != nil {
+		// Stored; the file watcher admits it even though registration failed.
+		log.WithField("state", state).Error("codex device login: the auth is stored but its runtime registration failed")
+	}
+	record := prepared.record
 	email, _ := record.Metadata["email"].(string)
 	planType, _ := record.Metadata["plan_type"].(string)
 	account := &codexDeviceAccount{Email: email, PlanType: planType, Name: record.FileName}
-	codexDeviceCredentials.mu.Lock()
-	defer codexDeviceCredentials.mu.Unlock()
-	if !codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusDone, account, "", "") {
-		// A cancel was accepted while the auth was being stored: undo this
-		// login's write, and only this login's.
-		h.rollbackCodexDeviceSaveLocked(ctx, state, save)
-		log.WithField("state", state).Info("codex device login cancelled during its save; its write was undone")
-		return
-	}
-	// Committed. A cancelled login's late write or rollback may have replaced
-	// the credential since this login wrote it: make sure it is this login's.
-	if stored, ok := h.storedCodexDeviceCredential(ctx, record); ok && (stored == nil || codexDeviceAccessToken(stored) != codexDeviceAccessToken(record)) {
-		if _, errResave := h.saveTokenRecord(ctx, record); errResave != nil {
-			log.WithField("state", state).Error("codex device login: failed to store the committed auth again")
-		}
-	}
-	codexDeviceCredentials.committed[filepath.Base(record.FileName)] = codexDeviceCommit{record: record, at: time.Now()}
-	CompleteOAuthSession(state)
+	codexDeviceLogins.transition(state, committing, codexDeviceStatusDone, account, "", "")
 	log.WithField("state", state).Info("codex device login stored an auth")
 }
 
@@ -457,7 +404,7 @@ func (h *Handler) GetCodexDeviceLoginStatus(c *gin.Context) {
 	}
 
 	status := record.status
-	if status == codexDeviceStatusSaving {
+	if status == codexDeviceStatusSaving || status == codexDeviceStatusCommitting {
 		status = codexDeviceStatusPending
 	}
 	body := gin.H{

@@ -792,12 +792,9 @@ func (h *Handler) CancelAuthSession(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return
 	}
-	// A device login's own state machine decides: a cancel and a commit cannot
-	// both win.
+	// A device login's own state machine decides, and settles its OAuth
+	// session: a cancel and a commit cannot both win.
 	if accepted, known := codexDeviceLogins.cancel(state); known {
-		if accepted {
-			CancelOAuthSession(state)
-		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "cancelled": accepted})
 		return
 	}

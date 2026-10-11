@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -123,7 +124,10 @@ func startAnthropicLogin(t *testing.T, router http.Handler, query string) (*url.
 	if payload.State == "" {
 		t.Fatalf("start response has no state: %s", w.Body.String())
 	}
-	t.Cleanup(func() { CancelOAuthSession(payload.State) })
+	t.Cleanup(func() {
+		CancelOAuthSession(payload.State)
+		waitForAnthropicLoginPollersToExit(t)
+	})
 	authURL, errParse := url.Parse(payload.URL)
 	if errParse != nil {
 		t.Fatalf("parse authorization URL %q: %v", payload.URL, errParse)
@@ -265,4 +269,25 @@ func waitForAnthropicSessionCompleted(t *testing.T, state string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for anthropic session %s to complete", state)
+}
+
+// waitForAnthropicLoginPollersToExit waits until no RequestAnthropicToken
+// poller is running, so none outlives its test and reads the OAuth session
+// store while a later test replaces it. A cancelled session ends its poller
+// at the poller's next check.
+func waitForAnthropicLoginPollersToExit(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if !strings.Contains(string(buf[:n]), "(*Handler).RequestAnthropicToken.func") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("an Anthropic login poller is still running after its session was cancelled")
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
