@@ -15,19 +15,27 @@ logins (`-codex-login`, `-codex-device-login`) are unchanged.
 This document is the contract the v2 dashboard builds against. It changes
 only by announcing the change to the dashboard side first.
 
-**Contract revision 3** (2026-10-11). Changes since revision 2 (`21157d78`):
+**Contract revision 4** (2026-10-11). Changes since revision 3 (`762f95a6`):
 
-- A `DELETE` that arrives once the gateway has begun storing a confirmed
-  login is refused (`cancelled: false`); the login then ends `done`, or
-  `failed` with `save_failed`. A `DELETE` before that point still wins, and
-  then nothing of the login was ever stored. Revision 2 accepted the cancel
-  and undid the write.
-- `done` means the credential is stored. A failed store write ends the
-  login `failed`/`save_failed`, never `done`.
-- What a gateway crash or restart can leave is stated
-  ([Crash and restart](#crash-and-restart)).
-- `get-auth-status` reports a finished device login's outcome whichever
-  request finished it (an expiry recorded by a status read included).
+- `get-auth-status` for a device login is derived from the login's own
+  record: `done` answers `{"status": "ok"}` for as long as the login is
+  reported (15 minutes after it finished), no longer for one minute, and no
+  outcome is lost when storing takes longer than the old session lifetime.
+- `done` means the credential is stored. Its registration with the running
+  gateway happens in the same step but is not part of `done`: if it fails,
+  the login is still `done` and the gateway uses the credential once it next
+  loads its auth store ([Storage](#storage)).
+- What a refused store write leaves is stated per token store
+  ([Storage](#storage)); for the Postgres store the v2 gateways use, and for
+  the object store, it is nothing.
+- Commits queue per account, and a cancel wins while a confirmed login waits
+  for another commit of its account; the cancel table says so, and its expiry
+  row now says "not yet confirmed".
+
+Revision 3 (`762f95a6`, since revision 2 `21157d78`): a `DELETE` once the
+commit has begun answers `cancelled: false`; `done` means stored; the
+[Crash and restart](#crash-and-restart) section; the legacy status follows
+whichever request finished the login.
 
 Routes, fields, states, error codes and headers are unchanged.
 
@@ -216,9 +224,9 @@ arrives:
 | Status when `DELETE` arrives | Answer | Status afterwards |
 |---|---|---|
 | `pending`, OpenAI not yet confirmed | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. The gateway stops polling OpenAI and stores nothing, even if OpenAI confirms later. |
-| `pending`, OpenAI confirmed before `expires_at`, the gateway preparing the credential (a racing poll) | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. The prepared credential is dropped; it was never stored or used. |
+| `pending`, OpenAI confirmed before `expires_at`, the gateway preparing the credential (a racing poll) or waiting to store it behind another login of the same account | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. The prepared credential is dropped; it was never stored or used. |
 | `pending`, the gateway storing the confirmed credential (its commit has begun) | `200 {"status": "ok", "cancelled": false}` | `done` once the credential is stored, or `failed` with `save_failed` if the store refused it. Keep polling `GET`. |
-| `pending` but `expires_at` has passed | `200 {"status": "ok", "cancelled": false}` | `expired` (no user code). |
+| `pending`, not yet confirmed by OpenAI, and `expires_at` has passed | `200 {"status": "ok", "cancelled": false}` | `expired` (no user code). A login OpenAI confirmed before `expires_at` follows the two rows above. |
 | `done` | `200 {"status": "ok", "cancelled": false}` | `done`; the stored auth stays. |
 | `expired`, `failed` or `cancelled` | `200 {"status": "ok", "cancelled": false}` | unchanged. |
 | no device login with this `state` (unknown, or forgotten after retention) | `200 {"status": "ok", "cancelled": false}` | `GET` answers `404 unknown_state`. |
@@ -230,7 +238,9 @@ first wins, and the commit is recorded before the credential is stored.
 never changes again, and nothing of the cancelled login is stored or used,
 then or later. Cancelling one login never removes or replaces a credential
 another login has committed: logins of the same account share one stored
-credential, and the login that commits last is the one stored.
+credential, and the login that commits last is the one stored. Commits of
+one account run one at a time; logins of other accounts do not wait for
+them.
 
 ## Crash and restart
 
@@ -249,11 +259,14 @@ reaches the token store only in the commit, which stores it and then reports
 
 ## Legacy status: `GET /v0/management/get-auth-status?state=<state>`
 
-Also works for a device login, with the existing coarse answers, the same
-whichever request finished the login: `pending` →
-`{"status": "wait"}`; `done` → `{"status": "ok"}` for one minute after
-completion; `failed` and `expired` → `{"status": "error", "error": "<message>"}`;
-`cancelled`, or later, → `{"status": "error", "error": "unknown or expired state"}`.
+Also works for a device login. Its answer is derived from the login's own
+record (the one the status route reports), so it is the same whichever request
+finished the login and however long storing took: `pending` →
+`{"status": "wait"}`; `done` → `{"status": "ok"}`; `failed` and `expired` →
+`{"status": "error", "error": "<message>"}`; `cancelled` →
+`{"status": "error", "error": "unknown or expired state"}`; for as long as the
+login is reported (15 minutes after it finished). After that, or for a state
+this gateway does not know, → `{"status": "error", "error": "unknown or expired state"}`.
 New clients use the status route above.
 
 ## Never returned
@@ -276,14 +289,31 @@ metadata `email` and `plan_type`, attribute `plan_type`, the token storage
 from the code exchange with `redirect_uri`
 `https://auth.openai.com/deviceauth/callback`. It is saved in the login's
 commit through the gateway's token store like every other management login,
-and registered with the running gateway in the same step, so once the login
-is `done` it appears in `GET /v0/management/auth-files` and is in use.
+so once the login is `done` it appears in `GET /v0/management/auth-files`.
+
+`done` means the token store accepted the credential. In the same step the
+gateway registers it with the running gateway, which then uses it at once.
+That registration is not part of `done`: if it fails, the gateway logs it, the
+login is still `done`, and the gateway uses the credential once it next loads
+its auth store (its auth-directory watcher, or at the latest its next start).
+
+A login whose store write is refused ends `failed` with `save_failed`. What
+the refused write leaves depends on the token store:
+
+| Token store | A refused write leaves |
+|---|---|
+| Postgres (`PGSTORE_*`; the v2 gateways) | Nothing: the database row and the local spool keep the previous credential, if any. The spool file is replaced only after the database write succeeded. |
+| Object store (`OBJECTSTORE_*`) | Nothing: the bucket and the local mirror keep the previous credential, if any. The mirror file is replaced only after the upload succeeded. |
+| File (the default auth directory) | The file is written in place; a failed write can leave it partly written. |
+| Git (`GITSTORE_*`) | The file is written and committed locally before the push; a refused commit or push leaves the local file. |
 
 ## Removed: the Codex browser login
 
 Under I-000026 the gateway no longer serves the Codex browser login with the
 `localhost:1455` redirect, through the management API or its callbacks. These
-requests answer `410 Gone` before any other validation of the request,
+requests answer `410 Gone` before any other validation of the request
+(a POSTed callback's state is its body's `state`, else the state in its
+`redirect_url`, as for every callback),
 start no session, start no callback forwarder, write nothing, and leave no
 query string in the gateway's access log:
 
