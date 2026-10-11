@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+	sessionmember "github.com/router-for-me/CLIProxyAPI/v8/internal/access/session_member"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
@@ -236,6 +237,7 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager = sdkaccess.NewManager()
 	}
 
+	sessionmember.Register(&b.cfg.SDKConfig)
 	configaccess.Register(&b.cfg.SDKConfig)
 	pluginHost := b.pluginHost
 	if pluginHost == nil {

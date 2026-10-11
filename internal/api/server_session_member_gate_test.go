@@ -206,7 +206,9 @@ func (e *memberGateExecutor) ExecuteStream(_ context.Context, _ *auth.Auth, req 
 	return nil, errors.New("streaming is not used by these tests")
 }
 
-func (e *memberGateExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) { return a, nil }
+func (e *memberGateExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
+	return a, nil
+}
 
 func (e *memberGateExecutor) CountTokens(_ context.Context, _ *auth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
 	e.record(req.Model)
