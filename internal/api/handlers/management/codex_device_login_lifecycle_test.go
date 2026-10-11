@@ -2,9 +2,14 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -325,4 +330,115 @@ func TestCodexDeviceLoginCancelPastExpiryIsRefused(t *testing.T) {
 	if _, after, rawAfter := h.status(state); after["status"] != "expired" {
 		t.Fatalf("status = %s, want expired", rawAfter)
 	}
+}
+
+// R2-1: a cancelled login whose save writes late, after another login of the
+// same account has committed, must leave that login's credential in place.
+func TestCodexDeviceLoginLateCancelledWriteRestoresTheCommittedLogin(t *testing.T) {
+	h := newCodexDeviceHarness(t, 0)
+	hash, err := bcrypt.GenerateFromPassword([]byte(codexDeviceTestKey), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AuthDir: h.authDir}
+	cfg.RemoteManagement.SecretKey = string(hash)
+	handler := NewHandlerWithoutConfigFilePath(cfg, nil)
+	handler.tokenStore = sdkAuth.NewFileTokenStore()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	// The first login stops before its write, so it writes after the second commits.
+	handler.postAuthHook = func(ctx context.Context, a *coreauth.Auth) error {
+		first := false
+		once.Do(func() { first = true })
+		if first {
+			close(entered)
+			<-release
+		}
+		return nil
+	}
+	router := gin.New()
+	g := router.Group("/v0/management", handler.Middleware())
+	g.POST("/codex-device-login", handler.StartCodexDeviceLogin)
+	g.GET("/codex-device-login", handler.GetCodexDeviceLoginStatus)
+	g.DELETE("/oauth-session", handler.CancelAuthSession)
+	h.router = router
+	pr9UseClient(&http.Client{Transport: pr9Transport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() == fakeOpenAITokenURL {
+			raw, _ := io.ReadAll(r.Body)
+			form, _ := url.ParseQuery(string(raw))
+			code := strings.TrimPrefix(form.Get("code"), "authcode-")
+			jwt := fakeCodexIDToken("same-account@example.test", "same-account", "pro")
+			return pr9Response(r, http.StatusOK, fmt.Sprintf(`{"access_token":"access-%s","refresh_token":"refresh-%s","id_token":%q,"expires_in":3600}`, code, code, jwt))
+		}
+		return h.fake.RoundTrip(r)
+	})}, 0)
+
+	first := h.start()["state"].(string)
+	h.fake.decide("CODE-0001", "approve")
+	pr9Wait(t, entered)
+	second := h.start()["state"].(string)
+	h.fake.decide("CODE-0002", "approve")
+	if done := h.waitStatus(second); done["status"] != "done" {
+		t.Fatalf("second login = %v, want done", done)
+	}
+	h.waitWatcher(second)
+	if _, cancel, raw := h.do(http.MethodDelete, "/v0/management/oauth-session?state="+first, true); cancel["cancelled"] != true {
+		t.Fatalf("cancel of the first login = %s, want cancelled true", raw)
+	}
+	close(release)
+	h.waitWatcher(first)
+
+	files := h.authFiles()
+	if len(files) != 1 {
+		t.Fatalf("stored auths = %v, want the second login's", files)
+	}
+	data, errRead := os.ReadFile(filepath.Join(h.authDir, files[0]))
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	var stored map[string]any
+	if errDecode := json.Unmarshal(data, &stored); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if stored["access_token"] != "access-CODE-0002" {
+		t.Fatalf("stored access token = %v, want the committed second login's", stored["access_token"])
+	}
+	if _, after, raw := h.status(second); after["status"] != "done" {
+		t.Fatalf("second login after the first's cancel = %s, want done", raw)
+	}
+	if _, after, raw := h.status(first); after["status"] != "cancelled" {
+		t.Fatalf("first login = %s, want cancelled", raw)
+	}
+}
+
+// R2-3: a known plugin session named openai keeps its callback even when the
+// provider is in the query and its state only in the body.
+func TestOAuthCallbackPluginOpenAIStateInBodyKeepsItsCallback(t *testing.T) {
+	replaceOAuthSessionStoreForTest(t, newOAuthSessionStore(time.Minute))
+	state := "plugin-openai-body-state"
+	if err := RegisterPluginOAuthSession(state, "openai", nil); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, nil)
+	router := gin.New()
+	router.POST("/oauth-callback", handler.PostOAuthCallback)
+	req := httptest.NewRequest(http.MethodPost, "/oauth-callback?provider=openai", strings.NewReader(`{"state":"`+state+`","code":"c"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plugin openai callback = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if _, errStat := os.Stat(filepath.Join(dir, ".oauth-openai-"+state+".oauth")); errStat != nil {
+		t.Fatalf("plugin callback file: %v", errStat)
+	}
+	// The built-in Codex flow keeps its 410 with the same query.
+	RegisterOAuthSession("builtin-codex-state", "codex")
+	req = httptest.NewRequest(http.MethodPost, "/oauth-callback?provider=openai", strings.NewReader(`{"state":"builtin-codex-state","code":"c"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assertCodexBrowserLoginRemoved(t, rec, "POST ?provider=openai with a built-in Codex state")
 }
