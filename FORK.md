@@ -77,9 +77,10 @@ management handler and SDK auth packages, and the race checks.
 
 ## Session member gate
 
-Fork-only, for the v2 gateways (operator's rule of 2026-10-11: a session keeps
-one model for its whole life, and the v2 gateway refuses inference for any
-model other than the session's member). Off unless the config sets it:
+Fork-only, for the v2 gateways: infra-v2 D-000400 item 1 (infra-v2 #1048,
+2026-10-11), a session runs one model for its whole life and the v2 gateway
+refuses inference for any model other than the session's member. Off unless
+the config sets it:
 
 ```yaml
 access:
