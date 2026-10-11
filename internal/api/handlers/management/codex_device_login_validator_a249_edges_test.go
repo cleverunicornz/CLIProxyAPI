@@ -1,8 +1,12 @@
 // Probes of validator a249 (CLIProxyAPI #9 at 95274db0, round 4), kept as
-// regression tests. Verbatim except TestA249RegistrationFailureStillClaimsInUse,
-// adapted to the contract chosen for R4-2: done means stored; a failed runtime
-// registration is logged and the stored credential is loaded at the latest
-// when the gateway next loads its auth store.
+// regression tests. Verbatim except two adaptations to the round-4 fix:
+// TestA249RegistrationFailureStillClaimsInUse follows the contract chosen for
+// R4-2 (done means stored; a failed runtime registration is logged and the
+// stored credential is loaded when the gateway next loads its auth store), and
+// TestA249MultiLoginEveryBoundary's queued phase occupies the account's commit
+// slot, which replaced the global commit mutex it locked, and
+// TestA249CancelExactlyAtCommit passes commitCodexDeviceLogin its run context;
+// TestA249CrashWorker's queued phase occupies the slot the same way.
 package management
 
 // Independent round-4 probes. Every provider, credential, code and account is fake.
@@ -112,7 +116,9 @@ func TestA249MultiLoginEveryBoundary(t *testing.T) {
 						}
 					}()
 					original := codexDeviceStagedHook
+					var stagedName atomic.Value
 					codexDeviceStagedHook = func(_ context.Context, a *coreauth.Auth) {
+						stagedName.Store(filepath.Base(a.FileName))
 						for i, g := range gates {
 							if a232Label(a) == a232FakeLabel(i+1) {
 								g.hold()
@@ -169,14 +175,16 @@ func TestA249MultiLoginEveryBoundary(t *testing.T) {
 						}
 					}
 					locked := false
+					var slot chan struct{}
 					defer func() {
 						if locked {
-							codexDeviceCommitMu.Unlock()
+							<-slot
 						}
 					}()
 					switch phase {
 					case "queued":
-						codexDeviceCommitMu.Lock()
+						slot = codexDeviceCommitSlot(stagedName.Load().(string))
+						slot <- struct{}{}
 						locked = true
 						gates[target].open()
 						a249StackContains(t, "(*Handler).commitCodexDeviceLogin(")
@@ -195,7 +203,7 @@ func TestA249MultiLoginEveryBoundary(t *testing.T) {
 					boundary.open()
 					gates[target].open()
 					if locked {
-						codexDeviceCommitMu.Unlock()
+						<-slot
 						locked = false
 					}
 					f.h.waitWatcher(states[target])
@@ -244,7 +252,7 @@ func TestA249CancelExactlyAtCommit(t *testing.T) {
 		start := make(chan struct{})
 		done := make(chan struct{})
 		answer := make(chan bool, 1)
-		go func() { <-start; f.handler.commitCodexDeviceLogin(context.Background(), state, prepared); close(done) }()
+		go func() { <-start; f.handler.commitCodexDeviceLogin(context.Background(), context.Background(), state, prepared); close(done) }()
 		go func() { <-start; b, _ := codexDeviceLogins.cancel(state); answer <- b }()
 		close(start)
 		accepted := <-answer
@@ -576,8 +584,10 @@ func TestA249CrashWorker(t *testing.T) {
 	case "staged":
 		codexDeviceStagedHook = func(context.Context, *coreauth.Auth) { gate.hold() }
 	case "queued":
-		codexDeviceCommitMu.Lock()
-		codexDeviceStagedHook = func(context.Context, *coreauth.Auth) { gate.hold() }
+		codexDeviceStagedHook = func(_ context.Context, a *coreauth.Auth) {
+			codexDeviceCommitSlot(filepath.Base(a.FileName)) <- struct{}{}
+			gate.hold()
+		}
 	case "store-entry":
 		f.handler.tokenStore = &a249Store{a232Store: f.store, before: func(context.Context, *coreauth.Auth) error { gate.hold(); return nil }}
 	case "store-accepted":

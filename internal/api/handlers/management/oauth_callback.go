@@ -26,7 +26,10 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 
 	var req oauthCallbackRequest
 	errBindJSON := c.ShouldBindJSON(&req)
-	if isCodexProviderName(c.Query("provider")) && !isPluginOAuthState(firstNonEmpty(c.Query("state"), oauthCallbackState(req))) {
+	// The POST callback's state is the one its parser uses (oauthCallbackState):
+	// the body's state, else the state in its redirect_url. A query state is
+	// not part of a POSTed callback.
+	if isCodexProviderName(c.Query("provider")) && !isPluginOAuthState(oauthCallbackState(req)) {
 		RespondCodexBrowserLoginRemoved(c)
 		return
 	}
@@ -185,11 +188,15 @@ func isPluginOAuthState(state string) bool {
 }
 
 // isCodexBrowserCallback reports a callback of the removed Codex browser
-// login (infra-v2 I-000026): a Codex provider, or the state of a built-in
-// Codex session, read from state or a pasted redirect_url without
+// login (infra-v2 I-000026): a Codex provider, the state of a device login,
+// or the state of a built-in Codex session, read from state or a pasted redirect_url without
 // validating either. Plugin sessions keep their own provider names.
 func isCodexBrowserCallback(req oauthCallbackRequest) bool {
-	sessionProvider, _, isPlugin, _, _, known := GetOAuthSessionDetails(oauthCallbackState(req))
+	state := oauthCallbackState(req)
+	if _, device := codexDeviceLogins.get(state); device {
+		return true
+	}
+	sessionProvider, _, isPlugin, _, _, known := GetOAuthSessionDetails(state)
 	if known && isPlugin {
 		return false
 	}

@@ -813,6 +813,12 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
+	// A Codex device login answers from its own record, the one authority on
+	// its outcome, for as long as the record is kept.
+	if record, known := codexDeviceLogins.get(state); known {
+		c.JSON(http.StatusOK, record.legacyStatus())
+		return
+	}
 	provider, status, isPlugin, metadata, completed, ok := GetOAuthSessionDetails(state)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})

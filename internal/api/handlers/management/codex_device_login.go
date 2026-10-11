@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -89,11 +90,15 @@ type codexDeviceLoginRecord struct {
 //	committing -> done        the credential is stored
 //	committing -> failed      the store refused the credential
 //
-// A login's credential is staged in memory until its commit and reaches the
-// token store only in the commit, so nothing of a pending, saving, cancelled,
-// expired or failed login is ever stored, and nothing is undone. A finished
-// login never changes again, and each finish also settles the login's legacy
-// OAuth session, whichever caller makes it.
+// A login's credential is staged in memory until its commit and is handed to
+// the token store only in the commit, so nothing of a pending, saving,
+// cancelled or expired login is ever written, and nothing is undone. A login
+// that ends failed because the store refused its write leaves what that store
+// leaves behind a refused write: the Postgres and object stores nothing (they
+// update their local mirror only after the remote write), the file and git
+// stores possibly a local file (see the contract's Storage section). A
+// finished login never changes again. This record is also the only source of
+// the login's legacy get-auth-status answer; no OAuth session is kept beside it.
 type codexDeviceLoginStore struct {
 	mu      sync.Mutex
 	now     func() time.Time
@@ -131,9 +136,8 @@ func (s *codexDeviceLoginStore) add(state string, record *codexDeviceLoginRecord
 }
 
 // transitionLocked moves the login state from one of from to status and
-// reports whether it did. A finished login hides its user code, stops its
-// poller and settles its legacy OAuth session the same way, so
-// get-auth-status agrees with the device status whoever finished the login.
+// reports whether it did. A finished login hides its user code and stops its
+// poller.
 func (s *codexDeviceLoginStore) transitionLocked(state string, record *codexDeviceLoginRecord, from []string, status string, account *codexDeviceAccount, errorCode, message string) bool {
 	if !slices.Contains(from, record.status) {
 		return false
@@ -148,14 +152,6 @@ func (s *codexDeviceLoginStore) transitionLocked(state string, record *codexDevi
 		record.finishedAt = s.now()
 		if record.stop != nil {
 			record.stop()
-		}
-		switch status {
-		case codexDeviceStatusDone:
-			CompleteOAuthSession(state)
-		case codexDeviceStatusCancelled:
-			CancelOAuthSession(state)
-		default:
-			SetOAuthSessionError(state, message)
 		}
 	}
 	return true
@@ -225,10 +221,32 @@ func (s *codexDeviceLoginStore) watcherDone(state string) <-chan struct{} {
 	return nil
 }
 
-// codexDeviceCommitMu serializes device-login commits: each stores its
-// credential and publishes done as one step, so of two logins of one
-// account (one stored credential) the one that commits last is stored.
-var codexDeviceCommitMu sync.Mutex
+// codexDeviceCommitSlots holds one commit slot per stored credential name,
+// that is per account: commits of one account run one at a time, each storing
+// its credential and publishing done as one step, so the login that commits
+// last is the one stored. Commits of other accounts do not wait. A login
+// waiting for its slot leaves the queue when it is cancelled.
+var codexDeviceCommitSlots sync.Map // credential name -> chan struct{} (capacity 1)
+
+func codexDeviceCommitSlot(name string) chan struct{} {
+	slot, _ := codexDeviceCommitSlots.LoadOrStore(name, make(chan struct{}, 1))
+	return slot.(chan struct{})
+}
+
+// legacyStatus is the device login's answer to get-auth-status, derived from
+// its record for as long as the record is kept.
+func (r codexDeviceLoginRecord) legacyStatus() gin.H {
+	switch r.status {
+	case codexDeviceStatusDone:
+		return gin.H{"status": "ok"}
+	case codexDeviceStatusFailed, codexDeviceStatusExpired:
+		return gin.H{"status": "error", "error": r.message}
+	case codexDeviceStatusCancelled:
+		return gin.H{"status": "error", "error": "unknown or expired state"}
+	default:
+		return gin.H{"status": "wait"}
+	}
+}
 
 // StartCodexDeviceLogin starts a Codex device login: POST
 // /v0/management/codex-device-login. The answer carries the verification URL
@@ -255,7 +273,6 @@ func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "codex")
 	ctx := PopulateAuthContext(context.Background(), c)
 	runCtx, stop := context.WithCancel(ctx)
 	record := &codexDeviceLoginRecord{
@@ -287,19 +304,16 @@ func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 // state; the SDK bounds polling and the exchange by the login's expiry. The
 // store's transitions decide whether the auth may be saved and kept.
 func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop context.CancelFunc, done chan struct{}, state string, login *sdkAuth.CodexDeviceLogin, opts sdkAuth.CodexDeviceOptions) {
-	var watchers sync.WaitGroup
 	defer close(done)
-	defer watchers.Wait()
 	defer stop()
-	watchers.Go(func() { watchOAuthSessionCancel(runCtx, stop, state, "codex") })
 	pending := []string{codexDeviceStatusPending}
 
 	authenticator := sdkAuth.NewCodexAuthenticator()
 	record, errComplete := authenticator.CompleteCodexDeviceLogin(runCtx, h.cfg, login, opts)
 	if errComplete != nil {
 		if errors.Is(errComplete, context.Canceled) {
-			// Cancelled through oauth-session, ended elsewhere, or expired when
-			// its status was read; the transition that ended it settled it.
+			// Cancelled through oauth-session, or expired when its status was
+			// read; the transition that ended it stopped the poller.
 			codexDeviceLogins.transition(state, pending, codexDeviceStatusCancelled, nil, "", "")
 			return
 		}
@@ -326,7 +340,7 @@ func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop con
 	}
 	if errPrepare != nil {
 		if runCtx.Err() != nil {
-			// Cancelled, or its session ended elsewhere, while staging.
+			// Cancelled while staging.
 			codexDeviceLogins.transition(state, saving, codexDeviceStatusCancelled, nil, "", "")
 			return
 		}
@@ -335,16 +349,24 @@ func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop con
 		}
 		return
 	}
-	h.commitCodexDeviceLogin(ctx, state, prepared)
+	h.commitCodexDeviceLogin(ctx, runCtx, state, prepared)
 }
 
 // commitCodexDeviceLogin stores a staged credential and publishes done, as one
-// step under codexDeviceCommitMu: the login must still be saving (not
+// step holding its account's commit slot: the login must still be saving (not
 // cancelled), the store must accept the credential, and done follows only
-// then. A refused store write ends the login failed with nothing stored.
-func (h *Handler) commitCodexDeviceLogin(ctx context.Context, state string, prepared *preparedTokenRecord) {
-	codexDeviceCommitMu.Lock()
-	defer codexDeviceCommitMu.Unlock()
+// then. A login cancelled while it waits for the slot leaves at once,
+// dropping its staged credential. A refused store write ends the login
+// failed.
+func (h *Handler) commitCodexDeviceLogin(ctx, runCtx context.Context, state string, prepared *preparedTokenRecord) {
+	slot := codexDeviceCommitSlot(filepath.Base(prepared.record.FileName))
+	select {
+	case slot <- struct{}{}:
+	case <-runCtx.Done():
+		// Cancelled while queued behind another commit of its account.
+		return
+	}
+	defer func() { <-slot }()
 	if !codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusCommitting, nil, "", "") {
 		// Cancelled while staged: its credential is dropped, never stored.
 		return
@@ -357,7 +379,8 @@ func (h *Handler) commitCodexDeviceLogin(ctx context.Context, state string, prep
 		return
 	}
 	if errPersist != nil {
-		// Stored; the file watcher admits it even though registration failed.
+		// Stored, so done; the running gateway loads it the next time it loads
+		// its auth store (its watcher or a restart).
 		log.WithField("state", state).Error("codex device login: the auth is stored but its runtime registration failed")
 	}
 	record := prepared.record

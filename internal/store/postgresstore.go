@@ -240,6 +240,11 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
+	// The credential is written to a temporary file first and moved into the
+	// local mirror only once the remote write succeeded, so a refused remote
+	// write leaves the previous credential, local mirror included, and the
+	// auth-directory watcher never sees a credential that was not stored.
+	tmp := path + ".tmp"
 	switch {
 	case auth.Storage != nil:
 		if auth.Metadata == nil {
@@ -249,7 +254,8 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
-		if err = auth.Storage.SaveTokenToFile(path); err != nil {
+		if err = auth.Storage.SaveTokenToFile(tmp); err != nil {
+			_ = os.Remove(tmp)
 			return "", err
 		}
 	case auth.Metadata != nil:
@@ -265,12 +271,8 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
 			return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
 		}
-		tmp := path + ".tmp"
 		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
 			return "", fmt.Errorf("postgres store: write temp auth file: %w", errWrite)
-		}
-		if errRename := os.Rename(tmp, path); errRename != nil {
-			return "", fmt.Errorf("postgres store: rename auth file: %w", errRename)
 		}
 	default:
 		return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
@@ -288,10 +290,15 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 
 	relID, err := s.relativeAuthID(path)
 	if err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
-	if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
+	if err = s.upsertAuthRecord(ctx, relID, tmp); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
+	}
+	if errRename := os.Rename(tmp, path); errRename != nil {
+		return "", fmt.Errorf("postgres store: rename auth file: %w", errRename)
 	}
 	return path, nil
 }
