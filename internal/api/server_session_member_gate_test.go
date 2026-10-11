@@ -458,7 +458,7 @@ func TestSessionMemberGateRefusesRoutesOutsideTheModelCheck(t *testing.T) {
 	}
 }
 
-func TestSessionMemberGateReusesAReviewWithinItsLifetime(t *testing.T) {
+func TestSessionMemberGateVerifiesEveryRequest(t *testing.T) {
 	h := newMemberGateHarness(t, true)
 
 	for i := 0; i < 3; i++ {
@@ -467,8 +467,10 @@ func TestSessionMemberGateReusesAReviewWithinItsLifetime(t *testing.T) {
 			t.Fatalf("request %d: status = %d; body %s", i, rec.Code, rec.Body.String())
 		}
 	}
-	if reviews, reads := h.kube.reviews.Load(), h.kube.podReads.Load(); reviews != 1 || reads != 1 {
-		t.Fatalf("token reviews = %d, pod reads = %d, want one of each for three requests", reviews, reads)
+	// No identity is reused: a token the API server stops accepting, or a pod that is gone or replaced, is refused on
+	// the very next request (validator finding F3, a216/W-5).
+	if reviews, reads := h.kube.reviews.Load(), h.kube.podReads.Load(); reviews != 3 || reads != 3 {
+		t.Fatalf("token reviews = %d, pod reads = %d, want three of each for three requests", reviews, reads)
 	}
 }
 
