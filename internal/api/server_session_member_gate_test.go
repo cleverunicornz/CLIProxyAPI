@@ -230,8 +230,14 @@ type memberGateHarness struct {
 // credential, and the access providers applied the way a config load applies them.
 func newMemberGateHarness(t *testing.T, gateOn bool) *memberGateHarness {
 	t.Helper()
+	return newMemberGateHarnessWithConfig(t, gateOn, "")
+}
+
+// newMemberGateHarnessWithConfig is newMemberGateHarness with more v8 YAML appended to the config (top-level sections).
+func newMemberGateHarnessWithConfig(t *testing.T, gateOn bool, extraYAML string) *memberGateHarness {
+	t.Helper()
 	kube := newFakeKubeAPI(t)
-	yamlConfig := "config-version: 8\naccess:\n  api-keys:\n    - " + memberGatePlainKey + "\n"
+	yamlConfig := extraYAML + "config-version: 8\naccess:\n  api-keys:\n    - " + memberGatePlainKey + "\n"
 	if gateOn {
 		yamlConfig += fmt.Sprintf("  session-member-gate:\n    enabled: true\n    audience: %s\n    namespace: %s\n    service-account: %s\n    api-server: %s\n    token-file: %s\n    ca-file: %s\n",
 			memberGateAudience, memberGateNamespace, memberGateServiceAccount, kube.server.URL, kube.tokenFile, kube.caFile)
