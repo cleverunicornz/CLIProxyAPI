@@ -1,9 +1,16 @@
 # Codex device login through the management API
 
 Fork-only (`cleverunicornz/CLIProxyAPI`, `internal/main`), from the operator's
-ruling of 2026-10-11: no localhost-callback logins where the provider supports
-device codes. The existing `GET /v0/management/codex-auth-url` login needs the
-operator to paste a `localhost:1455` address back; this login does not.
+ruling of 2026-10-11 and infra-v2 invariant I-000026: every provider login runs
+from the platform's interface by the provider's code flow, never by a pasted
+localhost redirect address, a pod shell or a port-forward. infra-v2 G-000480
+records the v2 dashboard's Codex login, which pasted a `localhost:1455`
+address back, as violating it.
+
+**The device code is the only Codex login through the management API.** The
+browser login with the localhost redirect is removed from it; see
+[Removed: the Codex browser login](#removed-the-codex-browser-login). The CLI
+logins (`-codex-login`, `-codex-device-login`) are unchanged.
 
 This document is the contract the v2 dashboard builds against. It changes
 only by announcing the change to the dashboard side first.
@@ -218,3 +225,32 @@ from the code exchange with `redirect_uri`
 `https://auth.openai.com/deviceauth/callback`. It is saved through the
 gateway's token store like every other management login, so it appears in
 `GET /v0/management/auth-files` and is used by the gateway right away.
+
+## Removed: the Codex browser login
+
+Under I-000026 the gateway no longer serves the Codex browser login with the
+`localhost:1455` redirect, through the management API or its callbacks. These
+requests answer `410 Gone`, start no session, start no callback forwarder, and
+write nothing:
+
+- `GET /v0/management/codex-auth-url`, with or without `is_webui`;
+- `GET /v8/management/oauth/auth-url?provider=codex`;
+- `POST` and `GET /v0/management/oauth-callback`, and the same under
+  `/v8/management/oauth/callback`, when `provider` is `codex` or `openai`, or
+  when `state` belongs to a Codex login (including a device login);
+- `GET /codex/callback`.
+
+Body:
+
+```json
+{
+  "status": "error",
+  "error": "codex_browser_login_removed",
+  "message": "The Codex browser login is removed; use the device login.",
+  "device_login": "POST /v0/management/codex-device-login"
+}
+```
+
+`codex-auth-url` and `oauth/auth-url` stay behind the management key, so a
+request without it still gets the middleware's `401` first. Other providers'
+logins, including Claude's code-page login, are unchanged.
