@@ -17,16 +17,18 @@ type oauthProvider struct {
 	apiPath    string // management API path
 	emoji      string
 	deviceFlow bool // true for RFC 8628 device-code providers
+	post       bool // true when the login starts with a POST instead of GET ?is_webui=true
 }
 
+// Codex logs in with the gateway's device login only (infra-v2 I-000026).
 var oauthProviders = []oauthProvider{
-	{"Claude (Anthropic)", "anthropic-auth-url", "🟧", false},
-	{"Codex (OpenAI)", "codex-auth-url", "🟩", false},
-	{"Antigravity", "antigravity-auth-url", "🟪", false},
-	{"Kimi (kimi.com)", "kimi-auth-url", "🟫", true},
-	{"Kimi (kimi.ai)", "kimi-ai-auth-url", "🟫", true},
-	{"xAI", "xai-auth-url", "⬛", true},
-	{"Meta", "meta-auth-url", "🔵", true},
+	{"Claude (Anthropic)", "anthropic-auth-url", "🟧", false, false},
+	{"Codex (OpenAI)", "codex-device-login", "🟩", true, true},
+	{"Antigravity", "antigravity-auth-url", "🟪", false, false},
+	{"Kimi (kimi.com)", "kimi-auth-url", "🟫", true, false},
+	{"Kimi (kimi.ai)", "kimi-ai-auth-url", "🟫", true, false},
+	{"xAI", "xai-auth-url", "⬛", true, false},
+	{"Meta", "meta-auth-url", "🔵", true, false},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -281,8 +283,14 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 
 func (m oauthTabModel) startOAuth(provider oauthProvider, generation int) tea.Cmd {
 	return func() tea.Msg {
-		// Call the auth URL endpoint with is_webui=true
-		data, err := m.client.getJSON("/v0/management/" + provider.apiPath + "?is_webui=true")
+		var data map[string]any
+		var err error
+		if provider.post {
+			data, err = m.client.postJSONResult("/v0/management/"+provider.apiPath, map[string]any{})
+		} else {
+			// Call the auth URL endpoint with is_webui=true
+			data, err = m.client.getJSON("/v0/management/" + provider.apiPath + "?is_webui=true")
+		}
 		if err != nil {
 			return oauthStartMsg{generation: generation, err: fmt.Errorf("failed to start %s login: %w", provider.name, err)}
 		}
@@ -352,8 +360,6 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 				switch p.apiPath {
 				case "anthropic-auth-url":
 					providerKey = "anthropic"
-				case "codex-auth-url":
-					providerKey = "codex"
 				case "antigravity-auth-url":
 					providerKey = "antigravity"
 				case "kimi-auth-url":
