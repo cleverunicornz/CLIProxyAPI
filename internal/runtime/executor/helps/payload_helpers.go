@@ -79,7 +79,11 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 		before := out
 		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
 		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
-		if string(out) != string(before) {
+		// With the session member gate on, the gateway strips the image tool on its own account (the Codex CLI sends
+		// it by default), so it also keeps the request valid: the tool leaves an allowed_tools choice, and a choice
+		// that requires a tool goes once none is left. With the gate off this stays exactly the base behaviour.
+		if cfg.SessionMemberGate.Enabled && string(out) != string(before) {
+			out = removeToolTypeFromAllowedToolsWithRoot(out, root, "image_generation")
 			out = dropUnsatisfiableToolChoiceWithRoot(out, root)
 		}
 	}
@@ -831,9 +835,6 @@ func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType
 		return payload
 	}
 	choiceType := strings.TrimSpace(choice.Get("type").String())
-	if strings.EqualFold(choiceType, "allowed_tools") {
-		return removeToolTypeFromAllowedTools(payload, toolChoicePath, choice, toolType)
-	}
 	if strings.EqualFold(choiceType, toolType) {
 		updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
 		if errDel == nil {
@@ -851,6 +852,16 @@ func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType
 		}
 	}
 	return payload
+}
+
+// removeToolTypeFromAllowedToolsWithRoot removes a tool type from an allowed_tools tool_choice (session member gate).
+func removeToolTypeFromAllowedToolsWithRoot(payload []byte, root string, toolType string) []byte {
+	toolChoicePath := buildPayloadPath(root, "tool_choice")
+	choice := gjson.GetBytes(payload, toolChoicePath)
+	if choice.Type != gjson.JSON || !strings.EqualFold(strings.TrimSpace(choice.Get("type").String()), "allowed_tools") {
+		return payload
+	}
+	return removeToolTypeFromAllowedTools(payload, toolChoicePath, choice, toolType)
 }
 
 // removeToolTypeFromAllowedTools removes a tool type from an allowed_tools tool_choice, and the choice itself when it

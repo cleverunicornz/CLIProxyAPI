@@ -385,6 +385,7 @@ type BaseAPIHandler struct {
 // Returns:
 //   - *BaseAPIHandler: A new API handlers instance
 func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *BaseAPIHandler {
+	SetMaxRequestBodyBytes(cfg)
 	return &BaseAPIHandler{
 		Cfg:         cfg,
 		AuthManager: authManager,
@@ -397,7 +398,10 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 // Parameters:
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
-func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
+	h.Cfg = cfg
+	SetMaxRequestBodyBytes(cfg)
+}
 
 // SetPluginHost configures the optional plugin interceptor host.
 func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {

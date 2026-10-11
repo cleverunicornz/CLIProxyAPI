@@ -62,6 +62,11 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// MaxRequestBodyMB bounds a client request body, in MiB, both as received and after each Content-Encoding
+	// decoding stage; a larger body is refused with 413 before it is read whole. 0 means the default
+	// (DefaultMaxRequestBodyMB); a negative value removes the bound.
+	MaxRequestBodyMB int `yaml:"max-request-body-mb,omitempty" json:"max-request-body-mb,omitempty"`
+
 	// SessionMemberGate authenticates v2 session pods by their projected ServiceAccount token and serves them
 	// inference only for their session's member model (fork-only).
 	SessionMemberGate SessionMemberGateConfig `yaml:"session-member-gate,omitempty" json:"session-member-gate,omitempty"`

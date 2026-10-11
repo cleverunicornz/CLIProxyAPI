@@ -47,3 +47,21 @@ func (c *SDKConfig) EffectiveDisableImageGeneration() DisableImageGenerationMode
 	}
 	return c.DisableImageGeneration
 }
+
+// DefaultMaxRequestBodyMB is the default bound on a client request body, as received and after each decoding stage.
+// 64 MiB is above what the providers behind this gateway accept in one request (Anthropic's Messages API refuses
+// requests over 32 MB; OpenAI accepts at most 50 MB of image input per request), with room for JSON framing and
+// base64, and it keeps a decompression bomb from expanding past it.
+const DefaultMaxRequestBodyMB = 64
+
+// MaxRequestBodyBytes is the effective request body bound in bytes; 0 means unbounded.
+func (c *SDKConfig) MaxRequestBodyBytes() int64 {
+	mb := DefaultMaxRequestBodyMB
+	if c != nil && c.MaxRequestBodyMB != 0 {
+		mb = c.MaxRequestBodyMB
+	}
+	if mb < 0 {
+		return 0
+	}
+	return int64(mb) << 20
+}

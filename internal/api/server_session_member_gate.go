@@ -62,7 +62,7 @@ func (s *Server) sessionMemberRouteGate() gin.HandlerFunc {
 }
 
 // sessionMemberCheckRawBody runs the gate's strict body check on the client's own body, decoded once from its
-// Content-Encoding, before any route converts it (legacy completions, a Responses-format chat body). The handler then
+// Content-Encoding within the request body bound (413 past it), before any route converts it (legacy completions, a Responses-format chat body). The handler then
 // reads exactly that body. It answers the refusal itself and reports false when the request must stop.
 func sessionMemberCheckRawBody(c *gin.Context) bool {
 	member := ""
@@ -77,6 +77,10 @@ func sessionMemberCheckRawBody(c *gin.Context) bool {
 	}
 	body, err := handlers.ReadRequestBody(c)
 	if err != nil {
+		if handlers.IsRequestBodyTooLarge(err) {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "session member gate: " + err.Error()})
+			return false
+		}
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "session member gate: the request body cannot be read"})
 		return false
 	}
