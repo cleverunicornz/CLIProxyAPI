@@ -202,9 +202,15 @@ jobs:
       - name: Check formatting
         shell: bash
         run: |
-          test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
-          test -z "$(gofmt -l internal/auth/claude internal/api/handlers/management)"
-          test -z "$(gofmt -l internal/api internal/tui sdk/auth internal/auth/codex internal/cmd internal/logging internal/store)"
+          set -euo pipefail
+          unformatted="$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go internal/auth/claude internal/api internal/tui sdk/auth internal/auth/codex internal/cmd internal/logging internal/store)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-formatted:"
+            echo "$unformatted"
+            gofmt -d $unformatted | head -60
+            exit 1
+          fi
+          git status --short
           git diff --check
       - name: Verify fixed retention and handler compatibility
         run: |
