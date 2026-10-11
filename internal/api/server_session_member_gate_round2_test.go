@@ -415,3 +415,56 @@ func TestSessionMemberGateR2StrippingKeepsTheOtherAllowedTools(t *testing.T) {
 		t.Fatalf("tool_choice = %s, want allowed_tools naming f alone", gjson.GetBytes(got[0], "tool_choice").Raw)
 	}
 }
+
+// R2-1 control: with response steering on, the gate refuses only what it must; a member's follow-up frames still run.
+func TestSessionMemberGateR2DuplexMemberFramesStillRun(t *testing.T) {
+	h := newMemberGateHarness(t, true)
+	h.server.cfg.Codex.ResponseSteering = true
+	h.server.cfg.CodexResponseSteering = true
+	h.server.handlers.Cfg.CodexResponseSteering = true
+	var mu sync.Mutex
+	var frames [][]byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		for n := 1; ; n++ {
+			_, p, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			frames = append(frames, append([]byte(nil), p...))
+			mu.Unlock()
+			_ = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.created","response":{"id":"r%d","output":[]}}`, n)))
+			_ = c.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"r%d","output":[]}}`, n)))
+		}
+	}))
+	defer upstream.Close()
+	h.server.handlers.AuthManager.RegisterExecutor(runtimeexec.NewCodexAutoExecutor(h.server.cfg))
+	if _, err := h.server.handlers.AuthManager.Register(context.Background(), &auth.Auth{ID: "member-gate-codex", Provider: "codex", Status: auth.StatusActive, Attributes: map[string]string{"api_key": "FAKE_UPSTREAM_KEY", "base_url": upstream.URL, "websockets": "true"}}); err != nil {
+		t.Fatal(err)
+	}
+	c := dialMemberGateWebsocket(t, h, "/v1/responses", codexSessionToken)
+	for i, frame := range []string{
+		`{"type":"response.create","model":"gpt-6-astra","input":[]}`,
+		`{"type":"response.create","model":"gpt-6-astra","input":[{"role":"user","content":"again"}]}`,
+	} {
+		if err := c.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+		if v := nextTerminalEvent(t, c); gjson.GetBytes(v, "type").String() != "response.completed" {
+			t.Fatalf("member frame %d: %s", i+1, v)
+		}
+	}
+	mu.Lock()
+	n := len(frames)
+	mu.Unlock()
+	if n != 2 {
+		t.Fatalf("upstream frames = %d, want 2", n)
+	}
+}

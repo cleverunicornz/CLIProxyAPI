@@ -1,9 +1,15 @@
 package api
 
 import (
+	"bytes"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
 // sessionMemberGateRoutes are the client API routes left open while the session member gate (fork-only) is on: the
@@ -45,9 +51,42 @@ func (s *Server) sessionMemberRouteGate() gin.HandlerFunc {
 			return
 		}
 		if _, ok := sessionMemberGateRoutes[c.Request.Method+" "+c.FullPath()]; ok {
+			if c.Request.Method == http.MethodPost && !sessionMemberCheckRawBody(c) {
+				return
+			}
 			c.Next()
 			return
 		}
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "session member gate: this route is not served to sessions; inference is served only for the session's member model on the chat, messages and responses routes"})
 	}
+}
+
+// sessionMemberCheckRawBody runs the gate's strict body check on the client's own body, decoded once from its
+// Content-Encoding, before any route converts it (legacy completions, a Responses-format chat body). The handler then
+// reads exactly that body. It answers the refusal itself and reports false when the request must stop.
+func sessionMemberCheckRawBody(c *gin.Context) bool {
+	member := ""
+	if raw, ok := c.Get("accessMetadata"); ok {
+		if metadata, okMetadata := raw.(map[string]string); okMetadata {
+			member = strings.TrimSpace(metadata[sdkaccess.MetadataSessionMember])
+		}
+	}
+	if member == "" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "session member gate: this gateway serves inference only to a session's member, and the request has no session member"})
+		return false
+	}
+	body, err := handlers.ReadRequestBody(c)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "session member gate: the request body cannot be read"})
+		return false
+	}
+	if reason := handlers.SessionMemberBodyError(member, body); reason != "" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "session member gate: " + reason})
+		return false
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	c.Request.ContentLength = int64(len(body))
+	c.Request.Header.Del("Content-Encoding")
+	c.Request.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return true
 }

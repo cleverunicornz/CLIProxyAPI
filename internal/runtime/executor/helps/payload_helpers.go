@@ -76,8 +76,12 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
 	if shouldStripImageGeneration(cfg.EffectiveDisableImageGeneration(), requestPath) {
+		before := out
 		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
 		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
+		if string(out) != string(before) {
+			out = dropUnsatisfiableToolChoiceWithRoot(out, root)
+		}
 	}
 
 	rules := cfg.Payload
@@ -827,6 +831,9 @@ func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType
 		return payload
 	}
 	choiceType := strings.TrimSpace(choice.Get("type").String())
+	if strings.EqualFold(choiceType, "allowed_tools") {
+		return removeToolTypeFromAllowedTools(payload, toolChoicePath, choice, toolType)
+	}
 	if strings.EqualFold(choiceType, toolType) {
 		updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
 		if errDel == nil {
@@ -842,6 +849,63 @@ func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType
 				return updated
 			}
 		}
+	}
+	return payload
+}
+
+// removeToolTypeFromAllowedTools removes a tool type from an allowed_tools tool_choice, and the choice itself when it
+// then allows no tool.
+func removeToolTypeFromAllowedTools(payload []byte, toolChoicePath string, choice gjson.Result, toolType string) []byte {
+	allowed := choice.Get("tools")
+	if !allowed.IsArray() {
+		return payload
+	}
+	kept := make([][]byte, 0, len(allowed.Array()))
+	for _, tool := range allowed.Array() {
+		if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), toolType) ||
+			strings.EqualFold(strings.TrimSpace(tool.Get("name").String()), toolType) {
+			continue
+		}
+		kept = append(kept, []byte(tool.Raw))
+	}
+	if len(kept) == len(allowed.Array()) {
+		return payload
+	}
+	if len(kept) == 0 {
+		if updated, errDel := sjson.DeleteBytes(payload, toolChoicePath); errDel == nil {
+			return updated
+		}
+		return payload
+	}
+	if updated, errSet := sjson.SetRawBytes(payload, toolChoicePath+".tools", JoinRawJSONArray(kept)); errSet == nil {
+		return updated
+	}
+	return payload
+}
+
+// dropUnsatisfiableToolChoiceWithRoot removes a tool_choice that requires a tool ("required", or Anthropic's
+// {"type":"any"}) once stripping has left no tool, so the provider is not asked for a tool call it cannot make.
+func dropUnsatisfiableToolChoiceWithRoot(payload []byte, root string) []byte {
+	if tools := gjson.GetBytes(payload, buildPayloadPath(root, "tools")); tools.IsArray() && len(tools.Array()) > 0 {
+		return payload
+	}
+	toolChoicePath := buildPayloadPath(root, "tool_choice")
+	choice := gjson.GetBytes(payload, toolChoicePath)
+	requires := false
+	switch choice.Type {
+	case gjson.String:
+		requires = strings.EqualFold(strings.TrimSpace(choice.String()), "required") ||
+			strings.EqualFold(strings.TrimSpace(choice.String()), "any")
+	case gjson.JSON:
+		choiceType := strings.TrimSpace(choice.Get("type").String())
+		requires = strings.EqualFold(choiceType, "any") || strings.EqualFold(choiceType, "required") ||
+			strings.EqualFold(choiceType, "allowed_tools")
+	}
+	if !requires {
+		return payload
+	}
+	if updated, errDel := sjson.DeleteBytes(payload, toolChoicePath); errDel == nil {
+		return updated
 	}
 	return payload
 }

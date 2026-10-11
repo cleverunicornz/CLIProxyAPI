@@ -270,14 +270,30 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
+	writer := newResponsesWebsocketWriter(conn)
 	var duplexInput <-chan cliproxyexecutor.WebsocketInput
 	if h != nil && h.Cfg != nil && h.Cfg.CodexResponseSteering {
 		socketCtx, cancelSocket := context.WithCancel(c.Request.Context())
 		defer cancelSocket()
 		c.Request = c.Request.WithContext(socketCtx)
-		duplexInput = readResponsesWebsocketInput(socketCtx, cancelSocket, conn)
+		// With response steering the executor reads follow-up frames itself and writes them upstream, so the session
+		// member gate checks every frame here, before either the executor or this handler sees it (fork-only).
+		var refuseFrame func([]byte) bool
+		if h.Cfg.SessionMemberGate.Enabled {
+			gateCtx := context.WithValue(socketCtx, "gin", c)
+			refuseFrame = func(payload []byte) bool {
+				errMsg := h.SessionMemberFrameError(gateCtx, payload)
+				if errMsg == nil {
+					return false
+				}
+				if _, errWrite := writeResponsesWebsocketError(writer, nil, errMsg); errWrite != nil {
+					log.Warnf("responses websocket: writing the session member gate's refusal failed: %v", errWrite)
+				}
+				return true
+			}
+		}
+		duplexInput = readResponsesWebsocketInput(socketCtx, cancelSocket, conn, refuseFrame)
 	}
-	writer := newResponsesWebsocketWriter(conn)
 	passthroughSessionID := uuid.NewString()
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)

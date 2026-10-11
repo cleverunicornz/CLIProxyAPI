@@ -9,7 +9,9 @@ import (
 
 // readResponsesWebsocketInput is the only downstream reader in duplex mode.
 // The bounded queue backpressures clients instead of retaining unlimited input.
-func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn) <-chan cliproxyexecutor.WebsocketInput {
+// readResponsesWebsocketInput reads the client's frames for the duplex path. A frame refuseFrame refuses (it has
+// already answered the client) is dropped, so no consumer forwards it.
+func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, refuseFrame func([]byte) bool) <-chan cliproxyexecutor.WebsocketInput {
 	input := make(chan cliproxyexecutor.WebsocketInput, 16)
 	go func() {
 		defer close(input)
@@ -20,6 +22,9 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelFunc,
 				return
 			}
 			if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
+				continue
+			}
+			if refuseFrame != nil && refuseFrame(payload) {
 				continue
 			}
 			select {
