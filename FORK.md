@@ -183,6 +183,11 @@ has no release yet (a retry after an interrupted publish); a tag on another
 commit, or an existing release, stops it. A dispatch without `release_tag`
 only builds.
 
+A build for a candidate lane, deployed before it is promoted, is published
+with the input `prerelease` set (`-f prerelease=true`): the release is marked
+as a prerelease and never becomes the latest release. Without it the release
+is published as before. The tag scheme and counter are the same either way.
+
 ## Public fork Actions controls
 
 On 2026-10-04 the fork's Actions contributor approval policy was set to
