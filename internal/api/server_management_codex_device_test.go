@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	log "github.com/sirupsen/logrus"
 )
 
 // The device-login routes are management routes: registered under
@@ -77,5 +80,57 @@ func TestCodexLocalhostCallbackIsRemoved(t *testing.T) {
 	}
 	if !management.IsOAuthSessionPending(state, "codex") {
 		t.Fatal("the removed callback ended the session")
+	}
+}
+
+// The removed Codex routes answer 410 and their access-log lines carry no query
+// string: a pasted callback's authorization code never reaches a log.
+func TestCodexBrowserLoginRemovedRoutesLogNoQuery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("port: 8317\nremote-management: {secret-key: test-password}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Plugins.Dir = filepath.Dir(path)
+	h := management.NewHandler(cfg, path, nil)
+	h.SetLocalPassword("test-password")
+	engine := gin.New()
+	engine.Use(logging.GinLogrusLogger())
+	s := &Server{cfg: cfg, engine: engine, mgmt: h}
+	s.managementRoutesEnabled.Store(true)
+	s.registerManagementRoutes()
+
+	var captured bytes.Buffer
+	old := log.StandardLogger().Out
+	log.SetOutput(&captured)
+	t.Cleanup(func() { log.SetOutput(old) })
+
+	const marker = "REMOVED_ROUTE_FAKE_CODE"
+	for _, tc := range []struct{ method, target, body string }{
+		{http.MethodGet, "/v0/management/codex-auth-url?is_webui=true&code=" + marker, ""},
+		{http.MethodGet, "/v8/management/oauth/auth-url?provider=codex&code=" + marker, ""},
+		{http.MethodGet, "/v0/management/oauth-callback?provider=codex&code=" + marker + "&state=codex-fake-state", ""},
+		{http.MethodGet, "/v8/management/oauth/callback?provider=openai&code=" + marker, ""},
+		{http.MethodPost, "/v0/management/oauth-callback?code=" + marker, `{"provider":"codex","code":"` + marker + `"}`},
+	} {
+		req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusGone {
+			t.Fatalf("%s %s = %d %s, want 410", tc.method, tc.target, rec.Code, rec.Body.String())
+		}
+	}
+	if strings.Contains(captured.String(), marker) {
+		t.Fatalf("a removed route logged its query or body: %s", captured.String())
+	}
+	if !strings.Contains(captured.String(), "/v0/management/codex-auth-url") {
+		t.Fatalf("the removed routes were not access-logged at all: %s", captured.String())
 	}
 }

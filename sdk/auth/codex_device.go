@@ -80,6 +80,9 @@ type CodexDeviceOptions struct {
 	HTTPClient   *http.Client
 	Timeout      time.Duration
 	PollInterval time.Duration
+	// SlowDownStep is how much a slow_down answer raises the polling interval
+	// (RFC 8628 section 3.5: 5 seconds by default).
+	SlowDownStep time.Duration
 }
 
 // CodexDeviceLogin is a Codex device login OpenAI has issued a user code for.
