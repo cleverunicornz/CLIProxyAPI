@@ -5,12 +5,14 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	log "github.com/sirupsen/logrus"
@@ -29,6 +31,11 @@ const (
 	codexDeviceStatusFailed    = "failed"
 	codexDeviceStatusExpired   = "expired"
 	codexDeviceStatusCancelled = "cancelled"
+	// codexDeviceStatusSaving is internal: OpenAI confirmed before expiry and
+	// the auth is being stored. It reads as pending.
+	codexDeviceStatusSaving = "saving"
+
+	codexDeviceExpiredMessage = "The device code expired before the login was completed"
 )
 
 // codexDeviceLoginOptions supplies the HTTP client and timings of a
@@ -58,7 +65,20 @@ type codexDeviceLoginRecord struct {
 }
 
 // codexDeviceLoginStore keeps the device logins of this gateway in memory:
-// pending ones until they finish, finished ones for the retention period.
+// pending ones until they finish, finished ones for the retention period. It
+// is the one state machine of a login. Every transition is a compare-and-set
+// under its lock:
+//
+//	pending -> saving     beginSave, only before expiry
+//	pending -> expired    at expiry (also when read), or OpenAI's expired_token
+//	pending -> failed     OpenAI or the exchange ended the login
+//	pending -> cancelled  cancel
+//	saving  -> done       commit, after the auth is stored
+//	saving  -> failed     the store refused the auth
+//	saving  -> cancelled  cancel; the watcher then removes what the save stored
+//
+// A finished login never changes again, so a cancel and a commit cannot both
+// win, and nothing is saved past expiry or after an accepted cancel.
 type codexDeviceLoginStore struct {
 	mu      sync.Mutex
 	now     func() time.Time
@@ -70,10 +90,14 @@ var codexDeviceLogins = &codexDeviceLoginStore{
 	records: make(map[string]*codexDeviceLoginRecord),
 }
 
+func codexDeviceFinished(status string) bool {
+	return status != codexDeviceStatusPending && status != codexDeviceStatusSaving
+}
+
 func (s *codexDeviceLoginStore) purgeLocked() {
 	now := s.now()
 	for state, record := range s.records {
-		if record.status != codexDeviceStatusPending && now.Sub(record.finishedAt) > codexDeviceLoginRetention {
+		if codexDeviceFinished(record.status) && now.Sub(record.finishedAt) > codexDeviceLoginRetention {
 			delete(s.records, state)
 		}
 	}
@@ -86,22 +110,65 @@ func (s *codexDeviceLoginStore) add(state string, record *codexDeviceLoginRecord
 	s.records[state] = record
 }
 
-// finish moves a pending login to a final status; a finished login keeps
-// its status.
-func (s *codexDeviceLoginStore) finish(state, status string, account *codexDeviceAccount, errorCode, message string) {
+// transitionLocked moves record from one of from to status and reports
+// whether it did. A finished login hides its user code and stops its poller.
+func (s *codexDeviceLoginStore) transitionLocked(record *codexDeviceLoginRecord, from []string, status string, account *codexDeviceAccount, errorCode, message string) bool {
+	if !slices.Contains(from, record.status) {
+		return false
+	}
+	record.status = status
+	if codexDeviceFinished(status) {
+		record.account = account
+		record.errorCode = errorCode
+		record.message = message
+		record.userCode = ""
+		record.verificationURI = ""
+		record.finishedAt = s.now()
+		if record.stop != nil {
+			record.stop()
+		}
+	}
+	return true
+}
+
+func (s *codexDeviceLoginStore) transition(state string, from []string, status string, account *codexDeviceAccount, errorCode, message string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record, ok := s.records[state]
-	if !ok || record.status != codexDeviceStatusPending {
-		return
+	return ok && s.transitionLocked(record, from, status, account, errorCode, message)
+}
+
+// expireLocked ends a pending login whose expiry has passed.
+func (s *codexDeviceLoginStore) expireLocked(record *codexDeviceLoginRecord) {
+	if record.status == codexDeviceStatusPending && !s.now().Before(record.expiresAt) {
+		s.transitionLocked(record, []string{codexDeviceStatusPending}, codexDeviceStatusExpired, nil, "expired", codexDeviceExpiredMessage)
 	}
-	record.status = status
-	record.account = account
-	record.errorCode = errorCode
-	record.message = message
-	record.userCode = ""
-	record.verificationURI = ""
-	record.finishedAt = s.now()
+}
+
+// beginSave admits the save of a login OpenAI confirmed: only a pending login
+// before its expiry. A login past expiry becomes expired instead.
+func (s *codexDeviceLoginStore) beginSave(state string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[state]
+	if !ok {
+		return false
+	}
+	s.expireLocked(record)
+	return s.transitionLocked(record, []string{codexDeviceStatusPending}, codexDeviceStatusSaving, nil, "", "")
+}
+
+// cancel ends a pending or saving login; known reports whether state is a
+// device login at all.
+func (s *codexDeviceLoginStore) cancel(state string) (accepted, known bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[state]
+	if !ok {
+		return false, false
+	}
+	s.expireLocked(record)
+	return s.transitionLocked(record, []string{codexDeviceStatusPending, codexDeviceStatusSaving}, codexDeviceStatusCancelled, nil, "", ""), true
 }
 
 func (s *codexDeviceLoginStore) get(state string) (codexDeviceLoginRecord, bool) {
@@ -112,17 +179,8 @@ func (s *codexDeviceLoginStore) get(state string) (codexDeviceLoginRecord, bool)
 	if !ok {
 		return codexDeviceLoginRecord{}, false
 	}
+	s.expireLocked(record)
 	return *record, true
-}
-
-// stop ends the background polling of a login, if it is still running.
-func (s *codexDeviceLoginStore) stop(state string) {
-	s.mu.Lock()
-	record, ok := s.records[state]
-	s.mu.Unlock()
-	if ok && record.stop != nil {
-		record.stop()
-	}
 }
 
 // watcherDone is closed when the background polling of state has exited;
@@ -142,7 +200,7 @@ func (s *codexDeviceLoginStore) watcherDone(state string) <-chan struct{} {
 func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 	random, errState := misc.GenerateRandomState()
 	if errState != nil {
-		log.WithError(errState).Error("codex device login: failed to generate state")
+		log.Error("codex device login: failed to generate state")
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "internal_error"})
 		return
 	}
@@ -151,14 +209,19 @@ func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 	opts := codexDeviceLoginOptions(h.cfg)
 	login, errStart := sdkAuth.StartCodexDeviceLogin(c.Request.Context(), h.cfg, opts)
 	if errStart != nil {
-		log.WithError(errStart).Warn("codex device login: OpenAI did not issue a device code")
-		c.JSON(http.StatusBadGateway, gin.H{"status": "error", "error": "device_code_request_failed", "message": errStart.Error()})
+		// Only the HTTP status leaves this handler, never OpenAI's body.
+		message := "OpenAI did not issue a device code"
+		if startErr, ok := errors.AsType[*sdkAuth.CodexDeviceStartError](errStart); ok {
+			message = startErr.Error()
+		}
+		log.WithField("reason", message).Warn("codex device login: OpenAI did not issue a device code")
+		c.JSON(http.StatusBadGateway, gin.H{"status": "error", "error": "device_code_request_failed", "message": message})
 		return
 	}
 
 	RegisterOAuthSession(state, "codex")
 	ctx := PopulateAuthContext(context.Background(), c)
-	pollCtx, stop := context.WithCancel(ctx)
+	runCtx, stop := context.WithCancel(ctx)
 	record := &codexDeviceLoginRecord{
 		status:          codexDeviceStatusPending,
 		verificationURI: login.VerificationURL,
@@ -168,7 +231,7 @@ func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 		done:            make(chan struct{}),
 	}
 	codexDeviceLogins.add(state, record)
-	go h.completeCodexDeviceLogin(ctx, pollCtx, stop, record.done, state, login, opts)
+	go h.completeCodexDeviceLogin(ctx, runCtx, stop, record.done, state, login, opts)
 
 	log.WithField("state", state).Info("codex device login started")
 	c.JSON(http.StatusOK, gin.H{
@@ -183,43 +246,62 @@ func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 	})
 }
 
-// completeCodexDeviceLogin polls OpenAI for one login and stores the auth
-// the way the CLI device login does. A cancel through oauth-session stops it
-// without storing anything.
-func (h *Handler) completeCodexDeviceLogin(ctx, pollCtx context.Context, stop context.CancelFunc, done chan struct{}, state string, login *sdkAuth.CodexDeviceLogin, opts sdkAuth.CodexDeviceOptions) {
+// completeCodexDeviceLogin polls OpenAI for one login and stores the auth the
+// way the CLI device login does. runCtx ends on a cancel or any other final
+// state; the SDK bounds polling and the exchange by the login's expiry. The
+// store's transitions decide whether the auth may be saved and kept.
+func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop context.CancelFunc, done chan struct{}, state string, login *sdkAuth.CodexDeviceLogin, opts sdkAuth.CodexDeviceOptions) {
 	defer close(done)
 	defer stop()
-	go watchOAuthSessionCancel(pollCtx, stop, state, "codex")
+	go watchOAuthSessionCancel(runCtx, stop, state, "codex")
+	pending := []string{codexDeviceStatusPending}
 
 	authenticator := sdkAuth.NewCodexAuthenticator()
-	record, errComplete := authenticator.CompleteCodexDeviceLogin(pollCtx, h.cfg, login, opts)
+	record, errComplete := authenticator.CompleteCodexDeviceLogin(runCtx, h.cfg, login, opts)
 	if errComplete != nil {
-		if !IsOAuthSessionPending(state, "codex") {
-			codexDeviceLogins.finish(state, codexDeviceStatusCancelled, nil, "", "")
+		if errors.Is(errComplete, context.Canceled) {
+			// Cancelled through oauth-session, ended elsewhere, or expired when
+			// its status was read.
+			codexDeviceLogins.transition(state, pending, codexDeviceStatusCancelled, nil, "", "")
+			if current, ok := codexDeviceLogins.get(state); ok && current.status == codexDeviceStatusExpired {
+				SetOAuthSessionError(state, codexDeviceExpiredMessage)
+			}
 			return
 		}
 		status, errorCode, message := classifyCodexDeviceError(errComplete)
-		codexDeviceLogins.finish(state, status, nil, errorCode, message)
-		SetOAuthSessionError(state, message)
-		log.WithFields(log.Fields{"state": state, "error_code": errorCode}).Warn("codex device login ended without a login")
+		if codexDeviceLogins.transition(state, pending, status, nil, errorCode, message) {
+			SetOAuthSessionError(state, message)
+			log.WithFields(log.Fields{"state": state, "error_code": errorCode}).Warn("codex device login ended without a login")
+		}
 		return
 	}
 
-	if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
-		codexDeviceLogins.finish(state, codexDeviceStatusCancelled, nil, "", "")
+	if !codexDeviceLogins.beginSave(state) {
+		// Cancelled or expired while OpenAI answered: nothing is saved.
 		return
 	}
-	if _, errSave := h.saveTokenRecord(ctx, record); errSave != nil {
+	savedPath, errSave := h.saveTokenRecord(runCtx, record)
+	if errSave != nil {
 		message := "Failed to save authentication tokens"
-		codexDeviceLogins.finish(state, codexDeviceStatusFailed, nil, "save_failed", message)
-		SetOAuthSessionError(state, message)
-		log.WithError(errSave).WithField("state", state).Error("codex device login: failed to save the auth")
+		if codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusFailed, nil, "save_failed", message) {
+			SetOAuthSessionError(state, message)
+			log.WithField("state", state).Error("codex device login: failed to save the auth")
+		}
+		if savedPath != "" {
+			h.rollbackSavedTokenRecords(ctx, []string{savedPath})
+		}
 		return
 	}
 
 	email, _ := record.Metadata["email"].(string)
 	planType, _ := record.Metadata["plan_type"].(string)
-	codexDeviceLogins.finish(state, codexDeviceStatusDone, &codexDeviceAccount{Email: email, PlanType: planType, Name: record.FileName}, "", "")
+	account := &codexDeviceAccount{Email: email, PlanType: planType, Name: record.FileName}
+	if !codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusDone, account, "", "") {
+		// A cancel was accepted while the auth was being stored: remove it.
+		h.rollbackSavedTokenRecords(ctx, []string{savedPath})
+		log.WithField("state", state).Info("codex device login cancelled during its save; the stored auth was removed")
+		return
+	}
 	CompleteOAuthSession(state)
 	log.WithField("state", state).Info("codex device login stored an auth")
 }
@@ -227,7 +309,7 @@ func (h *Handler) completeCodexDeviceLogin(ctx, pollCtx context.Context, stop co
 func classifyCodexDeviceError(err error) (status, errorCode, message string) {
 	switch {
 	case errors.Is(err, sdkAuth.ErrCodexDeviceExpired):
-		return codexDeviceStatusExpired, "expired", "The device code expired before the login was completed"
+		return codexDeviceStatusExpired, "expired", codexDeviceExpiredMessage
 	case errors.Is(err, sdkAuth.ErrCodexDeviceRejected):
 		return codexDeviceStatusFailed, "provider_rejected", err.Error()
 	case errors.Is(err, sdkAuth.ErrCodexDeviceInvalidResponse):
@@ -260,9 +342,8 @@ func (h *Handler) GetCodexDeviceLoginStatus(c *gin.Context) {
 	}
 
 	status := record.status
-	if status == codexDeviceStatusPending && !IsOAuthSessionPending(state, "codex") {
-		// Cancelled through oauth-session; the poller is stopping.
-		status = codexDeviceStatusCancelled
+	if status == codexDeviceStatusSaving {
+		status = codexDeviceStatusPending
 	}
 	body := gin.H{
 		"state":      state,
@@ -284,8 +365,10 @@ func (h *Handler) GetCodexDeviceLoginStatus(c *gin.Context) {
 
 // RespondCodexBrowserLoginRemoved answers a request of the removed Codex
 // browser login (infra-v2 I-000026) with 410 Gone and points to the device
-// login. It starts and writes nothing.
+// login. It starts and writes nothing, and its access-log line carries no
+// query: a pasted callback's code is never logged.
 func RespondCodexBrowserLoginRemoved(c *gin.Context) {
+	logging.OmitGinQueryLogging(c)
 	c.JSON(http.StatusGone, gin.H{
 		"status":       "error",
 		"error":        "codex_browser_login_removed",

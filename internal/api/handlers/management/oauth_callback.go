@@ -24,6 +24,10 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
+	if isCodexProviderName(c.Query("provider")) {
+		RespondCodexBrowserLoginRemoved(c)
+		return
+	}
 	var req oauthCallbackRequest
 	if errBindJSON := c.ShouldBindJSON(&req); errBindJSON != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
@@ -33,6 +37,10 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 }
 
 func (h *Handler) GetOAuthCallback(c *gin.Context) {
+	if isCodexProviderName(c.Query("provider")) {
+		RespondCodexBrowserLoginRemoved(c)
+		return
+	}
 	req := oauthCallbackRequest{
 		Provider: strings.TrimSpace(c.Query("provider")),
 		Code:     strings.TrimSpace(c.Query("code")),
@@ -45,6 +53,13 @@ func (h *Handler) GetOAuthCallback(c *gin.Context) {
 func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) {
 	if h == nil || h.cfg == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
+		return
+	}
+
+	// A callback of the removed Codex browser login answers 410 before any
+	// other validation (I-000026).
+	if isCodexBrowserCallback(req) {
+		RespondCodexBrowserLoginRemoved(c)
 		return
 	}
 
@@ -87,10 +102,6 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	}
 
 	sessionProvider, sessionStatus, isPlugin, _, completed, ok := GetOAuthSessionDetails(state)
-	if isCodexBrowserCallback(req.Provider, sessionProvider, isPlugin, ok) {
-		RespondCodexBrowserLoginRemoved(c)
-		return
-	}
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
@@ -141,19 +152,33 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+// isCodexProviderName reports a provider name of the removed Codex browser
+// login: codex or openai.
+func isCodexProviderName(provider string) bool {
+	trimmed := strings.TrimSpace(provider)
+	if trimmed == "" {
+		return false
+	}
+	normalized, errNormalize := NormalizeOAuthProvider(trimmed)
+	return errNormalize == nil && normalized == "codex"
+}
+
 // isCodexBrowserCallback reports a callback of the removed Codex browser
 // login (infra-v2 I-000026): a Codex provider, or the state of a built-in
-// Codex session. Plugin sessions keep their own provider names.
-func isCodexBrowserCallback(requestProvider, sessionProvider string, isPlugin, sessionKnown bool) bool {
-	explicitCodex := false
-	if trimmed := strings.TrimSpace(requestProvider); trimmed != "" {
-		normalized, errNormalize := NormalizeOAuthProvider(trimmed)
-		explicitCodex = errNormalize == nil && normalized == "codex"
+// Codex session, read from state or a pasted redirect_url without
+// validating either. Plugin sessions keep their own provider names.
+func isCodexBrowserCallback(req oauthCallbackRequest) bool {
+	state := strings.TrimSpace(req.State)
+	if state == "" {
+		if u, errParse := url.Parse(strings.TrimSpace(req.RedirectURL)); errParse == nil {
+			state = strings.TrimSpace(u.Query().Get("state"))
+		}
 	}
-	if !sessionKnown {
-		return explicitCodex
+	sessionProvider, _, isPlugin, _, _, known := GetOAuthSessionDetails(state)
+	if known && isPlugin {
+		return false
 	}
-	return !isPlugin && (explicitCodex || strings.EqualFold(sessionProvider, "codex"))
+	return isCodexProviderName(req.Provider) || (known && strings.EqualFold(sessionProvider, "codex"))
 }
 
 func firstNonEmpty(values ...string) string {

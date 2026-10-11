@@ -73,6 +73,29 @@ var (
 	ErrCodexDeviceMissingAccount  = errors.New("codex token storage missing account information")
 )
 
+// CodexDeviceStartError is a device-code request OpenAI refused or did not
+// answer. It keeps the HTTP status alone (0 when no answer arrived), never
+// the response body or transport detail.
+type CodexDeviceStartError struct {
+	Status int
+}
+
+func (e *CodexDeviceStartError) Error() string {
+	switch {
+	case e.Status == 0:
+		return "OpenAI's device-code endpoint could not be reached"
+	case e.Status == http.StatusNotFound:
+		return "OpenAI's device-code endpoint is unavailable (HTTP 404)"
+	case codexDeviceIsSuccessStatus(e.Status):
+		return fmt.Sprintf("OpenAI answered the device-code request without a user code (HTTP %d)", e.Status)
+	default:
+		return fmt.Sprintf("OpenAI refused the device-code request (HTTP %d)", e.Status)
+	}
+}
+
+// codexDeviceSlowDownStep is RFC 8628 section 3.5's interval increase on slow_down.
+const codexDeviceSlowDownStep = 5 * time.Second
+
 // CodexDeviceOptions tunes a Codex device login started outside the CLI.
 // Zero values use the CLI's behavior: the proxy-aware client from the
 // configuration, the 15-minute limit and OpenAI's polling interval.
@@ -96,6 +119,7 @@ type CodexDeviceLogin struct {
 
 	deviceAuthID string
 	interval     time.Duration
+	slowDownStep time.Duration
 }
 
 func (o CodexDeviceOptions) httpClient(cfg *config.Config) *http.Client {
@@ -133,7 +157,7 @@ func StartCodexDeviceLogin(ctx context.Context, cfg *config.Config, opts CodexDe
 	}
 	deviceAuthID := strings.TrimSpace(userCodeResp.DeviceAuthID)
 	if userCode == "" || deviceAuthID == "" {
-		return nil, fmt.Errorf("codex device flow did not return required fields")
+		return nil, &CodexDeviceStartError{Status: http.StatusOK}
 	}
 
 	timeout := opts.Timeout
@@ -145,19 +169,28 @@ func StartCodexDeviceLogin(ctx context.Context, cfg *config.Config, opts CodexDe
 		interval = parseCodexDevicePollInterval(userCodeResp.Interval)
 	}
 
+	slowDownStep := opts.SlowDownStep
+	if slowDownStep <= 0 {
+		slowDownStep = codexDeviceSlowDownStep
+	}
+
 	return &CodexDeviceLogin{
 		VerificationURL: codexDeviceVerificationURL,
 		UserCode:        userCode,
 		ExpiresAt:       time.Now().Add(timeout),
 		deviceAuthID:    deviceAuthID,
 		interval:        interval,
+		slowDownStep:    slowDownStep,
 	}, nil
 }
 
 // CompleteCodexDeviceLogin polls OpenAI until the person signing in confirms
 // the user code, then exchanges the authorization code for tokens and builds
-// the auth record the CLI device login stores. It ends with ctx's error when
-// ctx is cancelled, and with one of the ErrCodexDevice errors otherwise.
+// the auth record the CLI device login stores. Polling and the exchange run
+// under the login's expiry: a request still in flight at ExpiresAt is
+// abandoned and the login ends with ErrCodexDeviceExpired. It ends with ctx's
+// error when ctx is cancelled, and with one of the ErrCodexDevice errors
+// otherwise; no error carries a provider response body.
 func (a *CodexAuthenticator) CompleteCodexDeviceLogin(ctx context.Context, cfg *config.Config, login *CodexDeviceLogin, opts CodexDeviceOptions) (*coreauth.Auth, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
@@ -168,10 +201,21 @@ func (a *CodexAuthenticator) CompleteCodexDeviceLogin(ctx context.Context, cfg *
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	parent := ctx
+	ctx, cancel := context.WithDeadline(parent, login.ExpiresAt)
+	defer cancel()
+	// expired reports err as the login's expiry when the deadline, not the
+	// caller, ended it.
+	expired := func(err error) error {
+		if parent.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || !time.Now().Before(login.ExpiresAt)) {
+			return ErrCodexDeviceExpired
+		}
+		return err
+	}
 
 	tokenResp, err := pollCodexDeviceToken(ctx, opts.httpClient(cfg), login)
 	if err != nil {
-		return nil, err
+		return nil, expired(err)
 	}
 
 	authCode := strings.TrimSpace(tokenResp.AuthorizationCode)
@@ -193,9 +237,13 @@ func (a *CodexAuthenticator) CompleteCodexDeviceLogin(ctx context.Context, cfg *
 	)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			return nil, expired(ctxErr)
 		}
-		return nil, fmt.Errorf("%w: %w", ErrCodexDeviceExchangeFailed, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err))
+		// The exchange error carries the token endpoint's body; it stays here.
+		return nil, ErrCodexDeviceExchangeFailed
+	}
+	if !time.Now().Before(login.ExpiresAt) {
+		return nil, ErrCodexDeviceExpired
 	}
 
 	return a.buildAuthRecord(authSvc, authBundle)
@@ -237,38 +285,37 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to request codex device code: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, &CodexDeviceStartError{}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read codex device code response: %w", err)
+		return nil, &CodexDeviceStartError{Status: resp.StatusCode}
 	}
-
 	if !codexDeviceIsSuccessStatus(resp.StatusCode) {
-		trimmed := strings.TrimSpace(string(respBody))
-		if resp.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf("codex device endpoint is unavailable (status %d)", resp.StatusCode)
-		}
-		if trimmed == "" {
-			trimmed = "empty response body"
-		}
-		return nil, fmt.Errorf("codex device code request failed with status %d: %s", resp.StatusCode, trimmed)
+		return nil, &CodexDeviceStartError{Status: resp.StatusCode}
 	}
 
 	var parsed codexDeviceUserCodeResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to decode codex device code response: %w", err)
+		return nil, &CodexDeviceStartError{Status: resp.StatusCode}
 	}
 
 	return &parsed, nil
 }
 
 // pollCodexDeviceToken polls OpenAI's device-token endpoint until it issues
-// the authorization code. OpenAI answers 403 or 404 while the login is
-// pending; any other non-success status ends the login.
+// the authorization code, as RFC 8628 section 3.5 asks: OpenAI's 403 or 404
+// and authorization_pending mean pending; slow_down raises the interval by
+// the login's slow-down step; expired_token ends the login as expired; any
+// other answer ends it as rejected. The response body is read only for its
+// error code.
 func pollCodexDeviceToken(ctx context.Context, client *http.Client, login *CodexDeviceLogin) (*codexDeviceTokenResponse, error) {
+	interval := login.interval
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -309,29 +356,61 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, login *Codex
 			return nil, ErrCodexDeviceUnreachable
 		}
 
-		switch {
-		case codexDeviceIsSuccessStatus(resp.StatusCode):
+		if codexDeviceIsSuccessStatus(resp.StatusCode) {
 			var parsed codexDeviceTokenResponse
 			if err := json.Unmarshal(respBody, &parsed); err != nil {
 				return nil, ErrCodexDeviceInvalidResponse
 			}
 			return &parsed, nil
-		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound:
-			wait := min(login.interval, time.Until(login.ExpiresAt))
-			if wait < 0 {
-				wait = 0
-			}
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, ctx.Err()
-			case <-timer.C:
-			}
-		default:
+		}
+		switch codexDeviceErrorCode(respBody) {
+		case "authorization_pending":
+		case "slow_down":
+			interval += login.slowDownStep
+		case "expired_token":
+			return nil, ErrCodexDeviceExpired
+		case "access_denied":
 			return nil, fmt.Errorf("%w with status %d", ErrCodexDeviceRejected, resp.StatusCode)
+		default:
+			if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusNotFound {
+				return nil, fmt.Errorf("%w with status %d", ErrCodexDeviceRejected, resp.StatusCode)
+			}
+		}
+
+		wait := min(interval, time.Until(login.ExpiresAt))
+		if wait < 0 {
+			wait = 0
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
 		}
 	}
+}
+
+// codexDeviceErrorCode reads the OAuth error code of a device-token answer:
+// {"error":"slow_down"} or {"error":{"code":"slow_down"}}; "" otherwise.
+func codexDeviceErrorCode(body []byte) string {
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || len(envelope.Error) == 0 {
+		return ""
+	}
+	var code string
+	if json.Unmarshal(envelope.Error, &code) == nil {
+		return strings.TrimSpace(code)
+	}
+	var object struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(envelope.Error, &object) == nil {
+		return strings.TrimSpace(object.Code)
+	}
+	return ""
 }
 
 func parseCodexDevicePollInterval(raw json.RawMessage) time.Duration {
