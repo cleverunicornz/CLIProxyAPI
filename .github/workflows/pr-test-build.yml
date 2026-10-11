@@ -125,6 +125,27 @@ jobs:
           grep -q 'slow_down HTTP=429 final=failed' "$RUNNER_TEMP/codex-a216-before.log"
           grep -q 'provider=codex HTTP=400' "$RUNNER_TEMP/codex-a216-before.log"
           grep -q 'fake-authorization-code-in-log=true' "$RUNNER_TEMP/codex-a216-before.log"
+      - name: Prove test-first failures of validator a234's findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a234-before"
+          git worktree add --detach "$before_dir" 89df64c9e9f202430ad969dc10fac7e2978b658d
+          cd "$before_dir"
+          set +e
+          go test -p 2 -race ./internal/api/handlers/management -run 'TestA234(Published|CancelCannot|PluginOpenAI|CancelOutcome|ConcurrentCancel|Polling5xx)|LateCancelledWriteRestores|PluginOpenAIStateInBody' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a234-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          for name in TestA234PublishedExpiryIsTheActualExpiry TestA234CancelCannotDeleteAnotherCompletedLogin TestA234PluginOpenAIQueryStillWorks TestCodexDeviceLoginLateCancelledWriteRestoresTheCommittedLogin TestOAuthCallbackPluginOpenAIStateInBodyKeepsItsCallback; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a234-before.log"
+          done
+          for name in TestA234CancelOutcomeTable TestA234ConcurrentCancelAndStatus TestA234Polling5xxTerminatesSafelyAndNextLoginWorks; do
+            grep -q -- "--- PASS: $name " "$RUNNER_TEMP/codex-a234-before.log"
+          done
+          grep -q 'at published expiry status=pending code-visible=true cancel-accepted=true' "$RUNNER_TEMP/codex-a234-before.log"
+          grep -q 'second final=done files-after=0' "$RUNNER_TEMP/codex-a234-before.log"
+          grep -q 'explicit-provider-query=true HTTP=410 callback-written=false' "$RUNNER_TEMP/codex-a234-before.log"
       - name: Check formatting
         shell: bash
         run: |
@@ -144,11 +165,12 @@ jobs:
           go test -p 2 -race ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
       - name: Verify the Codex device login and the removed browser login
         run: |
-          go test -p 2 ./internal/api/handlers/management ./internal/api ./internal/tui -run 'TestValidatorPR9|CodexDeviceLogin|CodexBrowserLogin|OAuthCallbackRefusesCodex|CodexLocalhostCallback|ManagementV8IndependentContract|OAuthCallbackRejectsCompletedSession|CodexOAuthStartsTheDeviceLogin|GetOAuthCallback' -count=1 -v
+          go test -p 2 ./internal/api/handlers/management ./internal/api ./internal/tui -run 'TestA234|TestValidatorPR9|CodexDeviceLogin|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|CodexLocalhostCallback|ManagementV8IndependentContract|OAuthCallbackRejectsCompletedSession|CodexOAuthStartsTheDeviceLogin|GetOAuthCallback' -count=1 -v
           go test -p 2 ./internal/api/... ./internal/logging ./internal/tui ./internal/auth/codex ./internal/cmd ./sdk/auth ./sdk/api/... -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api ./internal/logging ./internal/tui ./internal/auth/codex ./sdk/auth -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api -run '^TestValidatorPR9' -count=3
-          go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|CancelPast|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)' -count=10
+          go test -p 2 -race ./internal/api/handlers/management -run '^TestA234' -count=3
+          go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|CancelPast|LateCancelled|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)|TestA234(Published|CancelOutcome|ConcurrentCancel|Plugin|CancelCannot)' -count=10
       - name: Build portable server
         run: |
           CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server
