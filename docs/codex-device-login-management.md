@@ -1,0 +1,220 @@
+# Codex device login through the management API
+
+Fork-only (`cleverunicornz/CLIProxyAPI`, `internal/main`), from the operator's
+ruling of 2026-10-11: no localhost-callback logins where the provider supports
+device codes. The existing `GET /v0/management/codex-auth-url` login needs the
+operator to paste a `localhost:1455` address back; this login does not.
+
+This document is the contract the v2 dashboard builds against. It changes
+only by announcing the change to the dashboard side first.
+
+## Flow
+
+1. The client starts a login: `POST /v0/management/codex-device-login`.
+   The gateway asks OpenAI for a device code and answers with the
+   verification URL and the one-time user code.
+2. The operator opens the URL, signs in, and enters the code.
+3. Meanwhile the gateway polls OpenAI itself. When OpenAI issues the
+   authorization code, the gateway exchanges it for tokens and stores the
+   Codex auth exactly as the CLI device login (`-codex-device-login`) does.
+4. The client polls `GET /v0/management/codex-device-login?state=<state>`
+   until the status is no longer `pending`.
+5. The client may cancel a pending login at any time with
+   `DELETE /v0/management/oauth-session?state=<state>`.
+
+## Authentication
+
+Every route requires the management key, like every other
+`/v0/management` route: `Authorization: Bearer <key>` or
+`X-Management-Key: <key>`. Without a valid key the management middleware
+answers as it does for the other routes (for example `401` with
+`{"error": "..."}`), and nothing is started or disclosed.
+
+## Start: `POST /v0/management/codex-device-login`
+
+Request: no parameters. An empty body or `{}` is accepted; any body is
+ignored.
+
+`200 OK`:
+
+```json
+{
+  "status": "ok",
+  "flow": "device",
+  "state": "codex-device-3f0c9a5e1b7d4c2a8e6f0b1d2c3a4e5f",
+  "verification_uri": "https://auth.openai.com/codex/device",
+  "url": "https://auth.openai.com/codex/device",
+  "user_code": "ABCD-1234",
+  "expires_in": 900,
+  "expires_at": "2026-10-11T12:15:00Z"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `state` | The login's id. Matches `^codex-device-[0-9a-f]{32}$`. Used for status and cancel. |
+| `verification_uri` | The page the operator opens. Show it as a link. |
+| `url` | The same value, for clients written against the xAI/Kimi device responses. |
+| `user_code` | The one-time code the operator enters on that page. Show it. Do not log or audit it. |
+| `expires_in` | Seconds until the login expires: 900 (15 minutes, the CLI's and OpenAI Codex CLI's limit). |
+| `expires_at` | The same instant, RFC 3339, UTC. |
+
+Errors:
+
+| Status | Body | When |
+|---|---|---|
+| `502` | `{"status": "error", "error": "device_code_request_failed", "message": "<reason>"}` | OpenAI refused or did not answer the device-code request, or answered without a user code. `message` is human-readable and contains no secret. |
+| `500` | `{"status": "error", "error": "internal_error"}` | The gateway could not create the login (for example, random state generation failed). |
+
+Several logins may run at the same time. Each gets its own `state` and user
+code; finishing, failing or cancelling one does not affect another.
+
+## Status: `GET /v0/management/codex-device-login?state=<state>`
+
+`200 OK` with one of five `status` values. `state` and `expires_at` are
+always present.
+
+Pending, waiting for the operator:
+
+```json
+{
+  "state": "codex-device-…",
+  "status": "pending",
+  "verification_uri": "https://auth.openai.com/codex/device",
+  "user_code": "ABCD-1234",
+  "expires_at": "2026-10-11T12:15:00Z"
+}
+```
+
+Done, the auth is stored:
+
+```json
+{
+  "state": "codex-device-…",
+  "status": "done",
+  "expires_at": "2026-10-11T12:15:00Z",
+  "account": {
+    "email": "operator@example.com",
+    "plan_type": "pro",
+    "name": "codex-1a2b3c4d-operator@example.com-pro.json"
+  }
+}
+```
+
+`account.name` is the stored auth file's name, the same value as `name` in
+`GET /v0/management/auth-files`. `plan_type` is the ChatGPT plan read from
+the ID token (default `free`).
+
+Failed:
+
+```json
+{
+  "state": "codex-device-…",
+  "status": "failed",
+  "expires_at": "2026-10-11T12:15:00Z",
+  "error": "provider_rejected",
+  "message": "OpenAI ended the device login (status 400)"
+}
+```
+
+Expired:
+
+```json
+{
+  "state": "codex-device-…",
+  "status": "expired",
+  "expires_at": "2026-10-11T12:15:00Z",
+  "error": "expired",
+  "message": "The device code expired before the login was completed"
+}
+```
+
+Cancelled:
+
+```json
+{
+  "state": "codex-device-…",
+  "status": "cancelled",
+  "expires_at": "2026-10-11T12:15:00Z"
+}
+```
+
+`verification_uri` and `user_code` appear only while `pending`. `account`
+appears only on `done`. `error` and `message` appear only on `failed` and
+`expired`.
+
+`error` codes on `failed`:
+
+| `error` | When |
+|---|---|
+| `provider_rejected` | OpenAI's device-token poll answered with a status other than success or pending (`403`/`404`). OpenAI has no distinct "denied" answer; a denial arrives this way, or as no answer until expiry. |
+| `provider_unreachable` | The poll request to OpenAI failed at the network level. |
+| `invalid_provider_response` | OpenAI answered success without the authorization code fields. |
+| `exchange_failed` | Exchanging the authorization code for tokens failed. |
+| `missing_account` | The tokens carry no account e-mail, so the auth cannot be named or stored. |
+| `save_failed` | Storing the auth failed. |
+
+`message` is human-readable and never contains a code or token.
+
+Errors:
+
+| Status | Body | When |
+|---|---|---|
+| `400` | `{"status": "error", "error": "missing_state"}` | No `state` parameter. |
+| `400` | `{"status": "error", "error": "invalid_state"}` | `state` is malformed. |
+| `404` | `{"status": "error", "error": "unknown_state"}` | No device login with this `state`: never started on this gateway, started before a gateway restart, or finished more than 15 minutes ago. |
+
+### Retention
+
+A pending login stays pending until it finishes, is cancelled, or reaches
+`expires_at`, when it becomes `expired`. A finished login (`done`,
+`failed`, `expired`, `cancelled`) is reported for 15 minutes after it
+finished, then answers `404 unknown_state`. Nothing survives a gateway
+restart; a client polling across a restart gets `404 unknown_state` and
+should report that the gateway lost the login.
+
+Clients should poll every 2 to 5 seconds. The gateway's own polling of
+OpenAI uses OpenAI's interval (default 5 seconds), so `done` can lag the
+operator's confirmation by that much plus the token exchange.
+
+## Cancel: `DELETE /v0/management/oauth-session?state=<state>`
+
+The existing route, unchanged:
+
+- a pending login: `200 {"status": "ok", "cancelled": true}`; the gateway
+  stops polling OpenAI and stores nothing, even if OpenAI confirms later.
+  Status then reports `cancelled`.
+- a finished or unknown login: `200 {"status": "ok", "cancelled": false}`;
+  its status is unchanged.
+- `400 {"status": "error", "error": "missing state"}` or
+  `400 {"status": "error", "error": "invalid state"}`.
+
+## Legacy status: `GET /v0/management/get-auth-status?state=<state>`
+
+Also works for a device login, with the existing coarse answers: `pending` →
+`{"status": "wait"}`; `done` → `{"status": "ok"}` for one minute after
+completion; `failed` and `expired` → `{"status": "error", "error": "<message>"}`;
+`cancelled`, or later, → `{"status": "error", "error": "unknown or expired state"}`.
+New clients use the status route above.
+
+## Never returned
+
+No response, log line or error message carries:
+
+- OpenAI's `device_auth_id` (the device code: with the user code it lets
+  anyone poll for the authorization code);
+- the authorization code, the PKCE `code_verifier` or `code_challenge`;
+- the access, refresh or ID token, or an API key.
+
+The `user_code` is returned only to the management-key holder, only while the
+login is pending, and is not written to the gateway log.
+
+## Storage
+
+The stored auth is the one the CLI device login stores: provider `codex`, the
+file name `codex.CredentialFileName(email, plan_type, hash(account_id), true)`,
+metadata `email` and `plan_type`, attribute `plan_type`, the token storage
+from the code exchange with `redirect_uri`
+`https://auth.openai.com/deviceauth/callback`. It is saved through the
+gateway's token store like every other management login, so it appears in
+`GET /v0/management/auth-files` and is used by the gateway right away.
