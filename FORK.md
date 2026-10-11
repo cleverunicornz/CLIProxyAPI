@@ -100,27 +100,52 @@ ServiceAccount, reads the pod the token is bound to (its uid must match) and
 takes the member, `<harness>/<model>`, from the pod's annotation. The
 dashboard alone writes that annotation and admission keeps it unchanged after
 create, and a harness can present only its own pod's token, so it can claim no
-other member. A review is reused for one minute per token hash. The gateway's
-ServiceAccount needs `create` on `tokenreviews` and `get` on pods in the
-session namespace.
+other member. The gateway's ServiceAccount needs `create` on `tokenreviews` and
+`get` on pods in the session namespace.
 
-With the gate on:
+Nothing is cached. Every request is reviewed and its pod read again, and on a
+websocket, which authenticates once at the upgrade, every `response.create`
+frame is resolved again. A token the API server stops accepting, or a deleted
+or replaced pod, is refused at the gateway's next request or frame; a response
+already streaming when that happens runs to its end. The cost is one
+TokenReview and one pod read per request (two of each per websocket frame).
 
-- the three execution functions of `sdk/api/handlers` (non-stream, token
+With the gate on, every refusal is a 403 made before any credential or
+upstream is used:
+
+- any authentication failure on the client API routes, whatever the key;
+- in the three execution functions of `sdk/api/handlers` (non-stream, token
   count, stream), through which every chat, messages and responses route
-  runs, refuse with 403 a model other than the member's model (case and a
-  thinking suffix are ignored) and any request without a session member,
-  whatever client key it presents. The Responses websocket runs the same check
-  before execution, so the client receives the refusal as an error event;
+  runs: a request without a session member, or whose model is not the
+  member's model (case and a thinking suffix are ignored). The Responses
+  websocket checks each frame before execution and answers an error event;
+- a body the gateway and a provider could read differently: it is read once at
+  its top level, as a strict JSON decoder does, and refused when it names the
+  model more than once (in any letter case or escaping) or not as a string
+  naming the member's model, or repeats any other top-level key;
+- a tool that runs another model: any tool in `tools` or `tool_choice` that
+  names a model of its own, Anthropic's advisor tool (`advisor_*`), and a
+  stored Responses `prompt` template. The Responses `image_generation` tool,
+  which runs an image model, is stripped instead, because the Codex CLI sends
+  it by default: with the gate on the effective `disable-image-generation`
+  mode is `true`, so the payload finalizer removes it from `tools` and
+  `tool_choice` and the Codex executor never adds it. The other built-in tools
+  of the Responses and Messages APIs run on the request's model;
+- in the auth manager, before any credential is picked: a member's model that
+  an OAuth or API-key alias, a model pool or routing would run upstream as
+  another model on any credential of the request's providers;
 - client API routes that reach upstream credentials outside those functions
-  (realtime, live, alpha search, images, videos, Gemini generation) are
-  refused with 403. The model lists stay open, so a plain client key still
-  serves the readiness probe.
+  (realtime, live, alpha search, images, videos, Gemini generation). The
+  model lists stay open, so a valid plain client key still serves the
+  readiness probe.
 
 Pull request CI proves the gate tests fail at the test-first commit
 `6076094b7b1a5458904b73c6ccd56f5bda417776` (session tokens refused, a plain key
-served) while the gate-off control passes, then runs them, the affected
-packages and race checks.
+served), and the tests of the validator's findings (a216/W-5) fail at
+`df1698194d35801beccbb17435a67b68f1a74caf` (duplicate model fields served, an
+alias served, a stale identity served, 401 or 500 instead of 403, an injected
+image tool), while the gate-off control passes; then it runs them, the
+affected packages and race checks.
 
 ## Releases
 
