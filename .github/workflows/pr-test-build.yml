@@ -133,7 +133,9 @@ jobs:
           git worktree add --detach "$before_dir" 89df64c9e9f202430ad969dc10fac7e2978b658d
           cd "$before_dir"
           set +e
-          go test -p 2 -race ./internal/api/handlers/management -run 'TestA234(Published|CancelCannot|PluginOpenAI|CancelOutcome|ConcurrentCancel|Polling5xx)|LateCancelledWriteRestores|PluginOpenAIStateInBody' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a234-before.log"
+          # Without -race: the test-first commit predates the fix that joins each
+          # login's cancel watcher, and this step proves behavior.
+          go test -p 2 ./internal/api/handlers/management -run 'TestA234(Published|CancelCannot|PluginOpenAI|CancelOutcome|ConcurrentCancel|Polling5xx)|LateCancelledWriteRestores|PluginOpenAIStateInBody' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a234-before.log"
           before_status=${PIPESTATUS[0]}
           set -e
           test "$before_status" = 1
