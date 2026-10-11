@@ -148,12 +148,207 @@ jobs:
           grep -q '64 MiB decoded: status = 200 with 1 executions, want 413 with 0' "$log"
           grep -q 'the gate is off, so it must stay as the base leaves it' "$log"
           grep -q -- '--- PASS: TestImageToolChoiceCleanupRunsWithTheGateOn' "$log"
+      - name: Prove test-first Codex device-login failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-device-before"
+          git worktree add --detach "$before_dir" f710e456872ca89be1ff9521b5e97b6e9891f445
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api/handlers/management ./internal/api -run 'CodexDeviceLogin' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-device-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          for name in StartReturnsCodeWithoutDeviceSecret SuccessStoresAuthLikeTheCLI Expires DeniedFails CancelStopsPollingAndStoresNothing ConcurrentLoginsAreIndependent RequiresManagementKey StatusErrors StartFailsWhenOpenAIRefuses FinishedLoginIsForgottenAfterRetention; do
+            grep -q -- "--- FAIL: TestCodexDeviceLogin$name " "$RUNNER_TEMP/codex-device-before.log"
+          done
+          grep -q -- '--- FAIL: TestCodexDeviceLoginRoutesRequireManagementKey' "$RUNNER_TEMP/codex-device-before.log"
+          grep -q 'start status = 501' "$RUNNER_TEMP/codex-device-before.log"
+          grep -q '404 page not found, want 401' "$RUNNER_TEMP/codex-device-before.log"
+      - name: Prove test-first Codex browser-login removal failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-browser-before"
+          git worktree add --detach "$before_dir" cdb4fa498c45c09bfc4af5bc273a4b1c2e61f458
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api/handlers/management ./internal/api -run 'CodexBrowserLogin|OAuthCallbackRefusesCodex|CodexLocalhostCallback|ManagementV8IndependentContract|OAuthCallbackRejectsCompletedSession' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-browser-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q -- '--- FAIL: TestCodexBrowserLoginStartIsRemoved' "$RUNNER_TEMP/codex-browser-before.log"
+          grep -q -- '--- FAIL: TestOAuthCallbackRefusesCodex' "$RUNNER_TEMP/codex-browser-before.log"
+          grep -q -- '--- FAIL: TestCodexLocalhostCallbackIsRemoved' "$RUNNER_TEMP/codex-browser-before.log"
+          grep -q -- '--- FAIL: TestManagementV8IndependentContract' "$RUNNER_TEMP/codex-browser-before.log"
+          grep -q -- '--- PASS: TestOAuthCallbackRejectsCompletedSession' "$RUNNER_TEMP/codex-browser-before.log"
+          grep -q 'codex-auth-url = 200 .*redirect_uri=http%3A%2F%2Flocalhost%3A1455.*want 410' "$RUNNER_TEMP/codex-browser-before.log"
+      - name: Prove test-first TUI Codex device-login failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-tui-before"
+          git worktree add --detach "$before_dir" 72f9a86cfc2785bb1bce928f2373b54862b5534f
+          cd "$before_dir"
+          set +e
+          go test ./internal/tui -run 'CodexOAuthStartsTheDeviceLogin' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-tui-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q -- '--- FAIL: TestCodexOAuthStartsTheDeviceLogin' "$RUNNER_TEMP/codex-tui-before.log"
+          grep -q 'still uses the removed codex-auth-url' "$RUNNER_TEMP/codex-tui-before.log"
+      - name: Prove test-first failures of validator a216's findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a216-before"
+          git worktree add --detach "$before_dir" e6a71996eab2e49d45992b1927963b355da197e9
+          cd "$before_dir"
+          set +e
+          go test -p 2 -race ./internal/api/handlers/management ./internal/api -run 'TestValidatorPR9|CodexDeviceLogin(StartFailure|UnreachableStart|PollAndExchange|CancelDuringSave|CancelAfterDone|PollAnswers|SlowDownWaits|ExpiredTokenAnswer)|OAuthCallbackRefusesCodexBeforeValidation|CodexBrowserLoginRemovedRoutesLogNoQuery' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a216-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          for name in TestValidatorPR9StartErrorDoesNotDiscloseFakeMaterial TestValidatorPR9CancelBeforeSaveCannotPersistOrBecomeDone TestValidatorPR9InflightPollCannotOutliveExpiry TestValidatorPR9SlowDownRetriesRatherThanFails TestValidatorPR9RemovedCallbackMatchesPublishedContract TestValidatorPR9RemovedCallbackDoesNotLogFakeCode TestCodexDeviceLoginStartFailureDisclosesNothing TestCodexDeviceLoginUnreachableStartDisclosesNothing TestCodexDeviceLoginCancelDuringSaveRemovesWhatTheSaveStored TestCodexDeviceLoginPollAnswersFollowRFC8628 TestCodexDeviceLoginSlowDownWaitsFiveSecondsMore TestCodexDeviceLoginExpiredTokenAnswerExpires TestOAuthCallbackRefusesCodexBeforeValidation TestCodexBrowserLoginRemovedRoutesLogNoQuery; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a216-before.log"
+          done
+          grep -q -- '--- PASS: TestCodexDeviceLoginCancelAfterDoneIsRefused' "$RUNNER_TEMP/codex-a216-before.log"
+          grep -q -- '--- PASS: TestCodexDeviceLoginPollAndExchangeFailuresDiscloseNothing' "$RUNNER_TEMP/codex-a216-before.log"
+          grep -q 'fake-private-material-in-response=true' "$RUNNER_TEMP/codex-a216-before.log"
+          grep -q 'final=done stored-files=1' "$RUNNER_TEMP/codex-a216-before.log"
+          grep -q 'after-deadline status=pending user-code-visible=true' "$RUNNER_TEMP/codex-a216-before.log"
+          grep -q 'slow_down HTTP=429 final=failed' "$RUNNER_TEMP/codex-a216-before.log"
+          grep -q 'provider=codex HTTP=400' "$RUNNER_TEMP/codex-a216-before.log"
+          grep -q 'fake-authorization-code-in-log=true' "$RUNNER_TEMP/codex-a216-before.log"
+      - name: Prove test-first failures of validator a234's findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a234-before"
+          git worktree add --detach "$before_dir" 89df64c9e9f202430ad969dc10fac7e2978b658d
+          cd "$before_dir"
+          set +e
+          # Without -race: the test-first commit predates the fix that joins each
+          # login's cancel watcher, and this step proves behavior.
+          go test -p 2 ./internal/api/handlers/management -run 'TestA234(Published|CancelCannot|PluginOpenAI|CancelOutcome|ConcurrentCancel|Polling5xx)|LateCancelledWriteRestores|PluginOpenAIStateInBody' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a234-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          for name in TestA234PublishedExpiryIsTheActualExpiry TestA234CancelCannotDeleteAnotherCompletedLogin TestA234PluginOpenAIQueryStillWorks TestCodexDeviceLoginLateCancelledWriteRestoresTheCommittedLogin TestOAuthCallbackPluginOpenAIStateInBodyKeepsItsCallback; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a234-before.log"
+          done
+          for name in TestA234CancelOutcomeTable TestA234ConcurrentCancelAndStatus TestA234Polling5xxTerminatesSafelyAndNextLoginWorks; do
+            grep -q -- "--- PASS: $name " "$RUNNER_TEMP/codex-a234-before.log"
+          done
+          grep -q 'at published expiry status=pending code-visible=true cancel-accepted=true' "$RUNNER_TEMP/codex-a234-before.log"
+          grep -q 'second final=done files-after=0' "$RUNNER_TEMP/codex-a234-before.log"
+          grep -q 'explicit-provider-query=true HTTP=410 callback-written=false' "$RUNNER_TEMP/codex-a234-before.log"
+      - name: Prove test-first failures of validator a232's findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a232-before"
+          git worktree add --detach "$before_dir" 9eb8f940ceb917f9e7e08bcdbf179df782aec39d
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api/handlers/management -run '^(TestA232|TestA234CancelCannotDeleteAnotherCompletedLogin)' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a232-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          for name in TestA232ThreeLoginCancelMatrix TestA232CancelAtEachSaveBoundary TestA232StagedLoginIsNotLiveBeforeCommit TestA232FailedFinalPersistenceIsNotDone TestA232CrashAfterAcceptedCancelBeforeRecord TestA232PluginRedirectStateExemption TestA232ExpiryRaceLeavesLegacyWaiting; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a232-before.log"
+          done
+          for name in TestA232ConcurrentWriterSurvivesACancelledLogin TestA234CancelCannotDeleteAnotherCompletedLogin; do
+            grep -q -- "--- PASS: $name " "$RUNNER_TEMP/codex-a232-before.log"
+          done
+          test "$(grep -c 'ownership mismatch' "$RUNNER_TEMP/codex-a232-before.log")" = 20
+          grep -q 'statuses=\[cancelled cancelled cancelled\] file-count=1 stored-cancelled=true' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'phase=commit status-at-cancel=pending accepted=true' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'stored while staged=1' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'final status=done error=<nil> stored="" count=0' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'persisted-cancelled-auths=1' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'query-provider=true HTTP=410 callback-written=false' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'device-status=expired legacy-status=wait' "$RUNNER_TEMP/codex-a232-before.log"
+      - name: Prove test-first failures of validator a249's findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a249-before"
+          git worktree add --detach "$before_dir" ec9955ec7076e614c76cc39112dec4b160b06bd3
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api/handlers/management -run '^(TestA249(CancelledQueued|LegacyOutcome|PluginCallbackEffective|ObjectStoreRefusal|RegistrationFailure)|TestCodexDeviceLoginCommitOfAnotherAccountIsNotQueued)' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a249-before.log"
+          management_status=${PIPESTATUS[0]}
+          go test ./internal/store -run '^TestRemoteStoreRefusalLeavesLocalMirrorUnchanged$' -count=1 -v 2>&1 | tee -a "$RUNNER_TEMP/codex-a249-before.log"
+          store_status=${PIPESTATUS[0]}
+          set -e
+          test "$management_status" = 1
+          test "$store_status" = 1
+          for name in TestA249CancelledQueuedCredentialIsReleased TestA249LegacyOutcomeAfterLongCommit TestA249PluginCallbackEffectiveState TestA249ObjectStoreRefusalKeepsLocalCredential TestCodexDeviceLoginCommitOfAnotherAccountIsNotQueued TestRemoteStoreRefusalLeavesLocalMirrorUnchanged; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a249-before.log"
+          done
+          grep -q -- '--- PASS: TestA249RegistrationFailureStillClaimsInUse ' "$RUNNER_TEMP/codex-a249-before.log"
+          grep -q 'watcher-exited=false credential-retained=true' "$RUNNER_TEMP/codex-a249-before.log"
+          grep -q 'device-final=done legacy-final=error/unknown or expired state' "$RUNNER_TEMP/codex-a249-before.log"
+          grep -q 'device-final=failed legacy-final=error/unknown or expired state' "$RUNNER_TEMP/codex-a249-before.log"
+          grep -q 'unrelated-query=true status=410 callback=false' "$RUNNER_TEMP/codex-a249-before.log"
+          grep -q 'status=failed error=save_failed local-auths=1' "$RUNNER_TEMP/codex-a249-before.log"
+          grep -q 'want the previous one' "$RUNNER_TEMP/codex-a249-before.log"
+      - name: Prove test-first failures of validator a249's round-5 findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a249-r5-before"
+          git worktree add --detach "$before_dir" 834c400aa13bf7d7558169af5d238cb5cfc55a33
+          cd "$before_dir"
+          set +e
+          go test ./internal/store -run '^TestA249R5' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a249-r5-before.log"
+          store_status=${PIPESTATUS[0]}
+          go test -p 2 ./internal/api/handlers/management -run '^TestA249R5' -count=1 -v 2>&1 | tee -a "$RUNNER_TEMP/codex-a249-r5-before.log"
+          management_status=${PIPESTATUS[0]}
+          set -e
+          test "$store_status" = 1
+          test "$management_status" = 1
+          for name in TestA249R5RemoteMirrorWriteBoundaries TestA249R5RemoteAcceptedButMirrorPublicationFailed; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a249-r5-before.log"
+          done
+          for name in TestA249R5RemoteBackendLockBlocksDifferentAuth TestA249R5RemoteStoreBlocksOtherAccount TestA249R5DoneAuthFilesVisibilityAfterRegistrationFailure; do
+            grep -q -- "--- PASS: $name " "$RUNNER_TEMP/codex-a249-r5-before.log"
+          done
+          test "$(grep -c 'after the remote accepted the credential does not say it is stored' "$RUNNER_TEMP/codex-a249-r5-before.log")" = 8
+          grep -q 'remote-accepted=true uploads=1 status=failed error=save_failed' "$RUNNER_TEMP/codex-a249-r5-before.log"
+      - name: Prove test-first failures of validator a249's round-6 finding
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a249-r6-before"
+          git worktree add --detach "$before_dir" dbc80187f2ffc93dee94a17ccb1eccb11f004005
+          cd "$before_dir"
+          set +e
+          go test ./internal/store -run '^TestA249R6PostgresDoneRequiresActualWrite$' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a249-r6-before.log"
+          store_status=${PIPESTATUS[0]}
+          go test -p 2 ./internal/api/handlers/management -run '^TestA249R6DoneRequiresActualObjectWrite$' -count=1 -v 2>&1 | tee -a "$RUNNER_TEMP/codex-a249-r6-before.log"
+          management_status=${PIPESTATUS[0]}
+          set -e
+          test "$store_status" = 1
+          test "$management_status" = 1
+          grep -q 'staging=empty reports-stored=true rows=0 writes=0 deletes=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
+          grep -q 'staging=missing status=done remote-auths=0 PUTs=0 DELETEs=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
+          grep -q 'staging=empty status=done remote-auths=0 PUTs=0 DELETEs=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
+          grep -q 'staging=normal status=done remote-auths=1 PUTs=1 DELETEs=0 restart-loaded=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
       - name: Check formatting
         shell: bash
         run: |
-          test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
-          test -z "$(gofmt -l internal/auth/claude internal/api/handlers/management)"
-          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go internal/api/server_session_member_gate_round2_test.go sdk/api/handlers/openai/openai_responses_websocket.go sdk/api/handlers/openai/openai_responses_websocket_input.go internal/api/server_session_member_gate_round3_test.go sdk/api/handlers/request_body.go sdk/api/handlers/request_body_bound_test.go internal/runtime/executor/helps/payload_image_tool_choice_test.go)"
+          set -euo pipefail
+          unformatted="$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go internal/auth/claude internal/api internal/tui sdk/auth internal/auth/codex internal/cmd internal/logging internal/store internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go internal/api/server_session_member_gate_round2_test.go sdk/api/handlers/openai/openai_responses_websocket.go sdk/api/handlers/openai/openai_responses_websocket_input.go internal/api/server_session_member_gate_round3_test.go sdk/api/handlers/request_body.go sdk/api/handlers/request_body_bound_test.go internal/runtime/executor/helps/payload_image_tool_choice_test.go)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-formatted:"
+            echo "$unformatted"
+            gofmt -d $unformatted | head -60
+            exit 1
+          fi
+          git status --short
           git diff --check
       - name: Verify fixed retention and handler compatibility
         run: |
@@ -170,6 +365,15 @@ jobs:
           go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v
           go test -p 2 ./internal/access/... ./internal/config ./sdk/access ./sdk/api/handlers/... ./internal/api ./sdk/cliproxy/... ./internal/runtime/executor/... -count=1
           go test -p 2 -race ./internal/access/... ./sdk/access ./sdk/api/handlers ./internal/api ./sdk/cliproxy/auth ./internal/runtime/executor/helps -count=1
+      - name: Verify the Codex device login and the removed browser login
+        run: |
+          go test -p 2 ./internal/api/handlers/management ./internal/api ./internal/tui -run 'TestA249|TestA232|TestA234|TestValidatorPR9|CodexDeviceLogin|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|CodexLocalhostCallback|ManagementV8IndependentContract|OAuthCallbackRejectsCompletedSession|CodexOAuthStartsTheDeviceLogin|GetOAuthCallback' -count=1 -v
+          go test -p 2 ./internal/api/... ./internal/logging ./internal/store ./internal/tui ./internal/auth/codex ./internal/cmd ./sdk/auth ./sdk/api/... -count=1
+          go test -p 2 -race ./internal/api/handlers/management ./internal/api ./internal/logging ./internal/store ./internal/tui ./internal/auth/codex ./sdk/auth -count=1
+          go test -p 2 -race ./internal/api/handlers/management ./internal/api -run '^TestValidatorPR9' -count=3
+          go test -p 2 -race ./internal/api/handlers/management -run '^(TestA234|TestA232|TestA249)' -count=3
+          go test -p 2 -race ./internal/store -run '^(TestA249R5|TestA249R6|TestRemoteStoreRefusal)' -count=3
+          go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|CancelPast|LateCancelled|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)|TestA234(Published|CancelOutcome|ConcurrentCancel|Plugin|CancelCannot)' -count=10
       - name: Build portable server
         run: |
           CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server

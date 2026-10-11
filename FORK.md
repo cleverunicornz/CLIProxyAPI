@@ -193,6 +193,56 @@ video routes) instead. Only bodies over the bound are affected, which the
 providers refuse anyway. A body that is not decoded, on the Claude and Gemini
 routes, is still read as upstream reads it, without a bound.
 
+## Codex logins through the management API
+
+Fork-only, under infra-v2 I-000026 (every provider login runs from the
+platform's interface by the provider's code flow, never a pasted localhost
+redirect address, a pod shell or a port-forward) and G-000480, which records
+the v2 dashboard's Codex paste-back login as violating it. The device code
+is the only Codex login the management API offers:
+`POST /v0/management/codex-device-login` starts it and
+`GET /v0/management/codex-device-login?state=` reports it. The gateway polls
+OpenAI and stores the auth the CLI device login builds; OpenAI's
+`device_auth_id`, the authorization code, the PKCE values and the tokens are
+never returned. The browser login with the `localhost:1455` redirect is
+removed: `codex-auth-url`, the v8 `oauth/auth-url?provider=codex`,
+`oauth-callback` for Codex and `/codex/callback` answer `410 Gone` with
+`codex_browser_login_removed` and start nothing. The TUI's Codex login uses
+the device login. The CLI logins (`-codex-login`, `-codex-device-login`) are
+unchanged. The contract is
+[docs/codex-device-login-management.md](docs/codex-device-login-management.md).
+
+Each login is one state machine with compare-and-set transitions, so a cancel
+and a completion never both succeed, nothing is stored past the expiry or
+after an accepted cancel, and polling follows RFC 8628 (`slow_down` raises the
+interval by 5 s). A login's credential stays in memory until its commit, which
+stores it, registers it and only then reports `done`; a cancel wins only before
+the commit, so a cancelled login's credential is never stored, nothing is ever
+undone, and a crash before the commit leaves nothing. Commits queue per account,
+and a cancelled queued login leaves the queue at once. `get-auth-status`
+answers a device login from its record. The Postgres and object stores now
+move a credential into their local mirror only after the remote write
+succeeded, so a refused write leaves the previous credential; a credential the
+store of record accepted is stored (`done`) even if publishing the local copy
+then fails, which the next start reconciles. Their save refuses a missing or
+empty staged credential and never deletes, so `done` follows only an actual
+credential write. `expires_at` is
+published to the nanosecond it is enforced. Failures carry at most an HTTP status, never a provider
+response body, and the removed routes leave no query string in the access log.
+
+Pull request CI proves the tests fail at the test-first commits
+`f710e456872ca89be1ff9521b5e97b6e9891f445` (device login),
+`cdb4fa498c45c09bfc4af5bc273a4b1c2e61f458` (browser login removed),
+`72f9a86cfc2785bb1bce928f2373b54862b5534f` (TUI) and
+`e6a71996eab2e49d45992b1927963b355da197e9` (validator a216's findings),
+`89df64c9e9f202430ad969dc10fac7e2978b658d` (validator a234's findings),
+`9eb8f940ceb917f9e7e08bcdbf179df782aec39d` (validator a232's findings),
+`ec9955ec7076e614c76cc39112dec4b160b06bd3` (validator a249's round-4 findings)
+`834c400aa13bf7d7558169af5d238cb5cfc55a33` (its round-5 findings) and
+`dbc80187f2ffc93dee94a17ccb1eccb11f004005` (its round-6 finding), then
+runs them and the race checks. OpenAI is played by an in-process fake; no
+request leaves CI.
+
 ## Releases
 
 The fork publishes its own GitHub releases from `internal/main` through

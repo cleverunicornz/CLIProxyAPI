@@ -140,6 +140,26 @@ func (c *Client) postJSON(path string, body any) error {
 	return nil
 }
 
+// postJSONResult sends a JSON body via POST and unmarshals the JSON answer.
+func (c *Client) postJSONResult(path string, body any) (map[string]any, error) {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	data, code, err := c.doRequest("POST", path, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, err
+	}
+	if code >= 400 {
+		return nil, fmt.Errorf("HTTP %d", code)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // GetConfig fetches the parsed config.
 func (c *Client) GetConfig() (map[string]any, error) {
 	return c.getJSON("/v0/management/config")

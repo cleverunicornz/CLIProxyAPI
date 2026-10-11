@@ -943,28 +943,69 @@ func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
 }
 
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
+	prepared, errPrepare := h.prepareTokenRecord(ctx, record)
+	if errPrepare != nil {
+		return "", errPrepare
+	}
+	return h.persistTokenRecord(ctx, prepared)
+}
+
+// preparedTokenRecord is a token record made ready to store: existing
+// metadata merged and the post-auth hook run. Nothing is stored yet.
+type preparedTokenRecord struct {
+	record                 *coreauth.Auth
+	legacyClaudeCredential *coreauth.Auth
+}
+
+// errStoredButNotRegistered marks a persistTokenRecord error that came after
+// the record was stored: it is persisted, but a later step (legacy cleanup,
+// runtime registration) failed.
+var errStoredButNotRegistered = errors.New("auth stored")
+
+// prepareTokenRecord merges existing metadata into record and runs the
+// post-auth hook, without storing anything.
+func (h *Handler) prepareTokenRecord(ctx context.Context, record *coreauth.Auth) (*preparedTokenRecord, error) {
 	if record == nil {
-		return "", fmt.Errorf("token record is nil")
+		return nil, fmt.Errorf("token record is nil")
 	}
 	h.mergeExistingAuthFileMetadata(record)
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
-		return "", fmt.Errorf("token store unavailable")
+		return nil, fmt.Errorf("token store unavailable")
 	}
 	legacyClaudeCredential, errLegacy := claudeauth.FindMatchingLegacyCredential(ctx, store, record)
 	if errLegacy != nil {
-		return "", errLegacy
+		return nil, errLegacy
 	}
 	if legacyClaudeCredential != nil {
 		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
 	}
 	if h.postAuthHook != nil {
 		if err := h.postAuthHook(ctx, record); err != nil {
-			return "", fmt.Errorf("post-auth hook failed: %w", err)
+			return nil, fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
+	return &preparedTokenRecord{record: record, legacyClaudeCredential: legacyClaudeCredential}, nil
+}
+
+// persistTokenRecord stores a prepared record and registers it through the
+// post-auth persist hook. An error wrapping errStoredButNotRegistered means
+// the record was stored: a later step failed, or the store of record accepted
+// it but its local mirror was not updated (coreauth.ErrMirrorNotUpdated).
+func (h *Handler) persistTokenRecord(ctx context.Context, prepared *preparedTokenRecord) (string, error) {
+	store := h.tokenStoreWithBaseDir()
+	if store == nil {
+		return "", fmt.Errorf("token store unavailable")
+	}
+	record := prepared.record
+	legacyClaudeCredential := prepared.legacyClaudeCredential
 	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if errSave != nil {
+		if errors.Is(errSave, coreauth.ErrMirrorNotUpdated) {
+			// Stored in the store of record; its mirror and the runtime catch up
+			// at the next load.
+			return savedPath, fmt.Errorf("%w; %w", errStoredButNotRegistered, errSave)
+		}
 		return savedPath, errSave
 	}
 	if legacyClaudeCredential != nil {
@@ -976,7 +1017,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			legacyID = strings.TrimSpace(legacyClaudeCredential.FileName)
 		}
 		if errDelete := store.Delete(ctx, legacyID); errDelete != nil {
-			return savedPath, fmt.Errorf("canonical Claude credential saved but legacy credential cleanup failed: %w", errDelete)
+			return savedPath, fmt.Errorf("%w; canonical Claude credential saved but legacy credential cleanup failed: %w", errStoredButNotRegistered, errDelete)
 		}
 	}
 	if h.postAuthPersistHook != nil {
@@ -990,7 +1031,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 				PluginAuthParser: h.pluginHost,
 			}, savedPath, data)
 			if errSynthesize != nil {
-				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)
+				return savedPath, fmt.Errorf("%w; synthesize persisted auth failed: %w", errStoredButNotRegistered, errSynthesize)
 			}
 			for _, auth := range auths {
 				if auth != nil && (auth.ID == record.ID || len(auths) == 1) {
@@ -1000,7 +1041,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			}
 		}
 		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
-			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
+			return savedPath, fmt.Errorf("%w; post-auth persist hook failed: %w", errStoredButNotRegistered, errHook)
 		}
 	}
 	return savedPath, nil
