@@ -141,9 +141,10 @@ upstream is used:
   which runs an image model, is stripped instead, because the Codex CLI sends
   it by default: with the gate on the effective `disable-image-generation`
   mode is `true`, so the payload finalizer removes it from `tools` and
-  `tool_choice` (from an `allowed_tools` choice too, which is dropped when it
-  allows nothing else), drops a `"required"` or `{"type":"any"}` choice that no
-  remaining tool can satisfy, and the Codex executor never adds it. The other
+  `tool_choice`, and (only with the gate on; with it off the stripping stays
+  exactly upstream's) from an `allowed_tools` choice, which is dropped when it
+  allows nothing else, and drops a `"required"` or `{"type":"any"}` choice that
+  no remaining tool can satisfy. The Codex executor never adds it. The other
   built-in tools of the Responses and Messages APIs run on the request's
   model;
 - in the auth manager, before any credential is picked: a member's model that
@@ -163,8 +164,24 @@ image tool), and the round-2 tests (a234/W-1) fail at
 `3526f7ffb6e7de70635c7382de40ef9ad57b2732` (duplex frames skip the gate with
 steering on, a nested duplicate tool type forwards the image tool, a stripped
 image tool leaves an unsatisfiable `tool_choice`, converted routes skip the
-strict check), while the gate-off control passes; then it runs them, the
-affected packages and race checks.
+strict check), and the round-3 tests fail at
+`33f47341f253a2d037282b79a1db6b826d34856c` (an unbounded decompressed body, a
+gate-off payload change), while the gate-off control passes; then it runs
+them, the affected packages and race checks.
+
+## Request body bound
+
+Fork-only, with the session member gate on or off. A client request body is
+bounded as received and after each `Content-Encoding` decoding stage, while it
+streams, so a small compressed body cannot expand into memory: past the bound
+it is refused with 413 before any execution (by the session member gate, and
+by the OpenAI chat, completions, responses and images handlers; a body that is
+not decoded, on the Claude and Gemini routes, is read as upstream reads it).
+The bound is `requests.max-body-mb`, default 64 MiB: above the providers' own
+maxima (Anthropic's Messages API refuses requests over 32 MB; OpenAI accepts at
+most 50 MB of image input per request), with room for JSON framing. A negative
+value removes it. Upstream reads the body and its decoded form whole, so with
+the gate off this differs from upstream only for bodies over the bound.
 
 ## Releases
 
