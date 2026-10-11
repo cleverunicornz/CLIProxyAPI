@@ -123,12 +123,37 @@ jobs:
           grep -q 'streaming legacy completions skipped the strict root decoder' "$log"
           grep -q -- '--- PASS: TestSessionMemberGateR2NeutralNestedFieldsKeepMember' "$log"
           grep -q -- '--- PASS: TestSessionMemberGateR2WebsocketAppendAndOtherFrames' "$log"
+      - name: Prove test-first round-3 finding failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-round3-before"
+          git worktree add --detach "$before_dir" 33f47341f253a2d037282b79a1db6b826d34856c
+          cd "$before_dir"
+          log="$RUNNER_TEMP/member-gate-round3-before.log"
+          set +e
+          go test -p 2 ./internal/api ./sdk/api/handlers ./internal/runtime/executor/helps -run 'R3|RequestBodyBound|ImageToolChoice' -count=1 -v 2>&1 | tee "$log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q -- '--- FAIL: TestR3DecoderTotalOutputBound' "$log"
+          grep -q -- '--- FAIL: TestRequestBodyBoundAppliesToEveryDecodingStage' "$log"
+          grep -q -- '--- FAIL: TestRequestBodyBoundAppliesToTheEncodedBody' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR3DecompressedBodyBound' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR3PlainBodyBound' "$log"
+          grep -q -- '--- FAIL: TestRequestBodyBoundAppliesWithTheGateOff' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR3RequestBodyBoundIsConfigurable' "$log"
+          grep -q -- '--- FAIL: TestR3GateOffImagePayloadSnapshot' "$log"
+          grep -q '64 MiB expanded into memory with no total-output limit' "$log"
+          grep -q '64 MiB decoded: status = 200 with 1 executions, want 413 with 0' "$log"
+          grep -q 'the gate is off, so it must stay as the base leaves it' "$log"
+          grep -q -- '--- PASS: TestImageToolChoiceCleanupRunsWithTheGateOn' "$log"
       - name: Check formatting
         shell: bash
         run: |
           test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
           test -z "$(gofmt -l internal/auth/claude internal/api/handlers/management)"
-          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go internal/api/server_session_member_gate_round2_test.go sdk/api/handlers/openai/openai_responses_websocket.go sdk/api/handlers/openai/openai_responses_websocket_input.go)"
+          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go internal/api/server_session_member_gate_round2_test.go sdk/api/handlers/openai/openai_responses_websocket.go sdk/api/handlers/openai/openai_responses_websocket_input.go internal/api/server_session_member_gate_round3_test.go sdk/api/handlers/request_body.go sdk/api/handlers/request_body_bound_test.go internal/runtime/executor/helps/payload_image_tool_choice_test.go)"
           git diff --check
       - name: Verify fixed retention and handler compatibility
         run: |
@@ -144,7 +169,7 @@ jobs:
         run: |
           go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v
           go test -p 2 ./internal/access/... ./internal/config ./sdk/access ./sdk/api/handlers/... ./internal/api ./sdk/cliproxy/... ./internal/runtime/executor/... -count=1
-          go test -p 2 -race ./internal/access/... ./sdk/access ./sdk/api/handlers ./internal/api ./sdk/cliproxy/auth -count=1
+          go test -p 2 -race ./internal/access/... ./sdk/access ./sdk/api/handlers ./internal/api ./sdk/cliproxy/auth ./internal/runtime/executor/helps -count=1
       - name: Build portable server
         run: |
           CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server
