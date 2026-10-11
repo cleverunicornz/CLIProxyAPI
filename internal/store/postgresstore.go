@@ -298,7 +298,10 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", err
 	}
 	if errRename := os.Rename(tmp, path); errRename != nil {
-		return "", fmt.Errorf("postgres store: rename auth file: %w", errRename)
+		// The store of record holds the credential; only the local mirror is
+		// stale until the next load reconciles it.
+		_ = os.Remove(tmp)
+		return path, fmt.Errorf("%w: postgres store: rename auth file: %w", cliproxyauth.ErrMirrorNotUpdated, errRename)
 	}
 	return path, nil
 }

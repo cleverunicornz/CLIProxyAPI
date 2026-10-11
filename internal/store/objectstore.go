@@ -242,7 +242,10 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", err
 	}
 	if errRename := os.Rename(tmp, path); errRename != nil {
-		return "", fmt.Errorf("object store: rename auth file: %w", errRename)
+		// The store of record holds the credential; only the local mirror is
+		// stale until the next load reconciles it.
+		_ = os.Remove(tmp)
+		return path, fmt.Errorf("%w: object store: rename auth file: %w", cliproxyauth.ErrMirrorNotUpdated, errRename)
 	}
 	return path, nil
 }

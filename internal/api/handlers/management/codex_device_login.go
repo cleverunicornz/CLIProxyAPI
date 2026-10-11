@@ -69,7 +69,9 @@ type codexDeviceLoginRecord struct {
 	finishedAt      time.Time
 	account         *codexDeviceAccount
 	errorCode       string
-	message         string
+	// message is the reason of a failed or expired login, or the note of a
+	// done login whose credential is stored but not yet in use.
+	message string
 
 	stop context.CancelFunc
 	done chan struct{}
@@ -93,10 +95,14 @@ type codexDeviceLoginRecord struct {
 // A login's credential is staged in memory until its commit and is handed to
 // the token store only in the commit, so nothing of a pending, saving,
 // cancelled or expired login is ever written, and nothing is undone. A login
-// that ends failed because the store refused its write leaves what that store
-// leaves behind a refused write: the Postgres and object stores nothing (they
-// update their local mirror only after the remote write), the file and git
-// stores possibly a local file (see the contract's Storage section). A
+// ends failed only when its write failed before the store of record accepted
+// it, leaving what that store leaves behind a refused write: the Postgres and
+// object stores nothing (they update their local mirror only after the remote
+// write), the file and git stores possibly a local file. Once the store of
+// record accepted it, the login is done, even if the local mirror or the
+// registration with the running gateway did not follow; the next start (or,
+// for a failed registration, the next load) catches them up (see the
+// contract's Storage section). A
 // finished login never changes again. This record is also the only source of
 // the login's legacy get-auth-status answer; no OAuth session is kept beside it.
 type codexDeviceLoginStore struct {
@@ -373,21 +379,33 @@ func (h *Handler) commitCodexDeviceLogin(ctx, runCtx context.Context, state stri
 	}
 	committing := []string{codexDeviceStatusCommitting}
 	_, errPersist := h.persistTokenRecord(ctx, prepared)
+	// Only a failure before the store of record accepted the credential is a
+	// refused write.
 	if errPersist != nil && !errors.Is(errPersist, errStoredButNotRegistered) {
 		codexDeviceLogins.transition(state, committing, codexDeviceStatusFailed, nil, "save_failed", "Failed to save authentication tokens")
 		log.WithField("state", state).Error("codex device login: the token store refused the auth")
 		return
 	}
-	if errPersist != nil {
+	// note records, on a done login, what did not follow the store write; it is
+	// kept in the login's record and logged, and is not part of any response.
+	note := ""
+	switch {
+	case errors.Is(errPersist, coreauth.ErrMirrorNotUpdated):
+		// The store of record accepted the credential: it is stored, so done.
+		note = "stored in the store of record; the local mirror was not updated and the running gateway did not register it; both catch up at the gateway's next start"
+	case errPersist != nil:
 		// Stored, so done; the running gateway loads it the next time it loads
 		// its auth store (its watcher or a restart).
-		log.WithField("state", state).Error("codex device login: the auth is stored but its runtime registration failed")
+		note = "stored; registration with the running gateway failed; it is used after the next load"
+	}
+	if note != "" {
+		log.WithField("state", state).WithField("note", note).Error("codex device login: the auth is stored, but not yet in use")
 	}
 	record := prepared.record
 	email, _ := record.Metadata["email"].(string)
 	planType, _ := record.Metadata["plan_type"].(string)
 	account := &codexDeviceAccount{Email: email, PlanType: planType, Name: record.FileName}
-	codexDeviceLogins.transition(state, committing, codexDeviceStatusDone, account, "", "")
+	codexDeviceLogins.transition(state, committing, codexDeviceStatusDone, account, "", note)
 	log.WithField("state", state).Info("codex device login stored an auth")
 }
 

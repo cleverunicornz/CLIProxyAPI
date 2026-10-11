@@ -990,7 +990,8 @@ func (h *Handler) prepareTokenRecord(ctx context.Context, record *coreauth.Auth)
 
 // persistTokenRecord stores a prepared record and registers it through the
 // post-auth persist hook. An error wrapping errStoredButNotRegistered means
-// the record was stored.
+// the record was stored: a later step failed, or the store of record accepted
+// it but its local mirror was not updated (coreauth.ErrMirrorNotUpdated).
 func (h *Handler) persistTokenRecord(ctx context.Context, prepared *preparedTokenRecord) (string, error) {
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
@@ -1000,6 +1001,11 @@ func (h *Handler) persistTokenRecord(ctx context.Context, prepared *preparedToke
 	legacyClaudeCredential := prepared.legacyClaudeCredential
 	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if errSave != nil {
+		if errors.Is(errSave, coreauth.ErrMirrorNotUpdated) {
+			// Stored in the store of record; its mirror and the runtime catch up
+			// at the next load.
+			return savedPath, fmt.Errorf("%w; %w", errStoredButNotRegistered, errSave)
+		}
 		return savedPath, errSave
 	}
 	if legacyClaudeCredential != nil {
