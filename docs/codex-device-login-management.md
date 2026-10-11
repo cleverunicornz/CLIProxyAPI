@@ -15,6 +15,22 @@ logins (`-codex-login`, `-codex-device-login`) are unchanged.
 This document is the contract the v2 dashboard builds against. It changes
 only by announcing the change to the dashboard side first.
 
+**Contract revision 3** (2026-10-11). Changes since revision 2 (`21157d78`):
+
+- A `DELETE` that arrives once the gateway has begun storing a confirmed
+  login is refused (`cancelled: false`); the login then ends `done`, or
+  `failed` with `save_failed`. A `DELETE` before that point still wins, and
+  then nothing of the login was ever stored. Revision 2 accepted the cancel
+  and undid the write.
+- `done` means the credential is stored. A failed store write ends the
+  login `failed`/`save_failed`, never `done`.
+- What a gateway crash or restart can leave is stated
+  ([Crash and restart](#crash-and-restart)).
+- `get-auth-status` reports a finished device login's outcome whichever
+  request finished it (an expiry recorded by a status read included).
+
+Routes, fields, states, error codes and headers are unchanged.
+
 ## Flow
 
 1. The client starts a login: `POST /v0/management/codex-device-login`.
@@ -179,8 +195,8 @@ instant to the nanosecond: a request to OpenAI
 still in flight at `expires_at` is abandoned, a confirmation arriving after it
 is ignored and nothing is stored, and from `expires_at` on the status reads
 `expired` without the user code. A login whose confirmation arrived before
-`expires_at` and whose auth is being stored still reads `pending` until it is
-`done`. A finished login (`done`,
+`expires_at` and whose credential is being stored still reads `pending` until
+it is `done` (or `failed`). A finished login (`done`,
 `failed`, `expired`, `cancelled`) is reported for 15 minutes after it
 finished, then answers `404 unknown_state`. Nothing survives a gateway
 restart; a client polling across a restart gets `404 unknown_state` and
@@ -200,22 +216,41 @@ arrives:
 | Status when `DELETE` arrives | Answer | Status afterwards |
 |---|---|---|
 | `pending`, OpenAI not yet confirmed | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. The gateway stops polling OpenAI and stores nothing, even if OpenAI confirms later. |
-| `pending`, OpenAI confirmed before `expires_at` and the auth is being stored (a racing poll) | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. If the save completes anyway, the gateway undoes that login's write and only it: it puts back the credential the write replaced (one another login of the same account committed meanwhile, else the one stored before), or removes the write if there was none. The login never becomes `done`. |
+| `pending`, OpenAI confirmed before `expires_at`, the gateway preparing the credential (a racing poll) | `200 {"status": "ok", "cancelled": true}` | `cancelled` at once. The prepared credential is dropped; it was never stored or used. |
+| `pending`, the gateway storing the confirmed credential (its commit has begun) | `200 {"status": "ok", "cancelled": false}` | `done` once the credential is stored, or `failed` with `save_failed` if the store refused it. Keep polling `GET`. |
 | `pending` but `expires_at` has passed | `200 {"status": "ok", "cancelled": false}` | `expired` (no user code). |
-| `done` | `200 {"status": "ok", "cancelled": false}` | `done`; the stored auth stays. A cancel and a completion never both succeed: whichever the gateway records first wins. |
+| `done` | `200 {"status": "ok", "cancelled": false}` | `done`; the stored auth stays. |
 | `expired`, `failed` or `cancelled` | `200 {"status": "ok", "cancelled": false}` | unchanged. |
 | no device login with this `state` (unknown, or forgotten after retention) | `200 {"status": "ok", "cancelled": false}` | `GET` answers `404 unknown_state`. |
 | `state` missing or malformed | `400 {"status": "error", "error": "missing state"}` or `400 {"status": "error", "error": "invalid state"}` | — |
 
+A cancel and a completion never both succeed: whichever the gateway records
+first wins, and the commit is recorded before the credential is stored.
 `cancelled: true` is final: `GET` reports `cancelled` from that answer on and
-never changes again, and the cancelled login's credential is not kept.
-Cancelling one login never removes or replaces a credential another login has
-committed: logins of the same account share one stored credential, and a
-`done` login's stays.
+never changes again, and nothing of the cancelled login is stored or used,
+then or later. Cancelling one login never removes or replaces a credential
+another login has committed: logins of the same account share one stored
+credential, and the login that commits last is the one stored.
+
+## Crash and restart
+
+A login's credential stays in the gateway's memory until its commit and
+reaches the token store only in the commit, which stores it and then reports
+`done`:
+
+- a crash or restart before the commit leaves nothing of the login: not its
+  credential, not its status. In particular a cancelled login's credential is
+  never stored;
+- a crash during the commit, after the credential is stored and before
+  `done` is reported, leaves the credential stored and in use, as if the
+  login had ended `done`;
+- after any restart the login itself answers `404 unknown_state`, and
+  `DELETE` answers `cancelled: false`.
 
 ## Legacy status: `GET /v0/management/get-auth-status?state=<state>`
 
-Also works for a device login, with the existing coarse answers: `pending` →
+Also works for a device login, with the existing coarse answers, the same
+whichever request finished the login: `pending` →
 `{"status": "wait"}`; `done` → `{"status": "ok"}` for one minute after
 completion; `failed` and `expired` → `{"status": "error", "error": "<message>"}`;
 `cancelled`, or later, → `{"status": "error", "error": "unknown or expired state"}`.
@@ -239,9 +274,10 @@ The stored auth is the one the CLI device login stores: provider `codex`, the
 file name `codex.CredentialFileName(email, plan_type, hash(account_id), true)`,
 metadata `email` and `plan_type`, attribute `plan_type`, the token storage
 from the code exchange with `redirect_uri`
-`https://auth.openai.com/deviceauth/callback`. It is saved through the
-gateway's token store like every other management login, so it appears in
-`GET /v0/management/auth-files` and is used by the gateway right away.
+`https://auth.openai.com/deviceauth/callback`. It is saved in the login's
+commit through the gateway's token store like every other management login,
+and registered with the running gateway in the same step, so once the login
+is `done` it appears in `GET /v0/management/auth-files` and is in use.
 
 ## Removed: the Codex browser login
 
