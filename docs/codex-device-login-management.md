@@ -15,7 +15,23 @@ logins (`-codex-login`, `-codex-device-login`) are unchanged.
 This document is the contract the v2 dashboard builds against. It changes
 only by announcing the change to the dashboard side first.
 
-**Contract revision 4** (2026-10-11). Changes since revision 3 (`762f95a6`):
+**Contract revision 5** (2026-10-11). Changes since revision 4 (`6eb4aecf`):
+
+- A login whose credential the store of record accepted is `done`, even when
+  the store's local copy or the registration with the running gateway did not
+  follow (they catch up at the next start, or the next load for a failed
+  registration); only a write that failed before the store of record accepted it ends
+  `failed` with `save_failed`. The Storage section states what each outcome
+  leaves.
+- `GET /v0/management/auth-files` lists a `done` credential once the running
+  gateway registered it: in the commit, or at its next load or start if that
+  registration (or the local copy) did not follow.
+- Logins of other accounts do not wait in the device-login queue, but the
+  token store serializes its own writes, so a hung store write delays other
+  accounts' commits; such a login reads `pending`, and a `DELETE` for it
+  answers `cancelled: false` (its commit began).
+
+Revision 4 (`6eb4aecf`, since revision 3 `762f95a6`):
 
 - `get-auth-status` for a device login is derived from the login's own
   record: `done` answers `{"status": "ok"}` for as long as the login is
@@ -239,8 +255,16 @@ never changes again, and nothing of the cancelled login is stored or used,
 then or later. Cancelling one login never removes or replaces a credential
 another login has committed: logins of the same account share one stored
 credential, and the login that commits last is the one stored. Commits of
-one account run one at a time; logins of other accounts do not wait for
-them.
+one account run one at a time; logins of other accounts do not wait for them
+in the device-login queue. Inside the token store, however, writes are
+serialized by the store's own lock, which predates the device login: the
+Postgres store holds it (`internal/store/postgresstore.go:236–237`) through
+the database write (`:296`), the object store
+(`internal/store/objectstore.go:185–186`) through the upload (`:240`), and the
+git store (`internal/store/gitstore.go:416–417`) through its commit and push.
+So a store write that hangs delays the commits of other accounts too. Such a
+login has begun its commit: it reads `pending`, a `DELETE` for it answers
+`cancelled: false`, and it ends `done` or `failed` once the store answers.
 
 ## Crash and restart
 
@@ -288,24 +312,33 @@ file name `codex.CredentialFileName(email, plan_type, hash(account_id), true)`,
 metadata `email` and `plan_type`, attribute `plan_type`, the token storage
 from the code exchange with `redirect_uri`
 `https://auth.openai.com/deviceauth/callback`. It is saved in the login's
-commit through the gateway's token store like every other management login,
-so once the login is `done` it appears in `GET /v0/management/auth-files`.
+commit through the gateway's token store like every other management login.
+`GET /v0/management/auth-files` lists the credentials the running gateway
+holds (`internal/api/handlers/management/auth_files.go:113–126`, when a
+runtime auth manager is attached), so a `done` credential appears there once
+it is registered: in the commit, at the gateway's next load when only the
+registration did not follow, or at its next start when the store's local copy
+did not follow. Clients show the
+account from the status response's `account`, not from `auth-files`.
 
-`done` means the token store accepted the credential. In the same step the
+`done` means the store of record accepted the credential. In the same step the
 gateway registers it with the running gateway, which then uses it at once.
 That registration is not part of `done`: if it fails, the gateway logs it, the
 login is still `done`, and the gateway uses the credential once it next loads
 its auth store (its auth-directory watcher, or at the latest its next start).
 
-A login whose store write is refused ends `failed` with `save_failed`. What
-the refused write leaves depends on the token store:
+What a commit leaves, by outcome and token store:
 
-| Token store | A refused write leaves |
-|---|---|
-| Postgres (`PGSTORE_*`; the v2 gateways) | Nothing: the database row and the local spool keep the previous credential, if any. The spool file is replaced only after the database write succeeded. |
-| Object store (`OBJECTSTORE_*`) | Nothing: the bucket and the local mirror keep the previous credential, if any. The mirror file is replaced only after the upload succeeded. |
-| File (the default auth directory) | The file is written in place; a failed write can leave it partly written. |
-| Git (`GITSTORE_*`) | The file is written and committed locally before the push; a refused commit or push leaves the local file. |
+| Outcome | Login status | Postgres (`PGSTORE_*`; the v2 gateways) | Object store (`OBJECTSTORE_*`) | File (the default auth directory) | Git (`GITSTORE_*`) |
+|---|---|---|---|---|---|
+| The store of record refused the write | `failed`, `save_failed` | Nothing changed: the database row and the local spool keep the previous credential, if any. | Nothing changed: the bucket and the local mirror keep the previous credential, if any. | The file is written in place; a failed write can leave it partly written. | The file is written and committed locally before the push; a refused commit or push leaves the local file. |
+| The store of record accepted the write, but publishing the local copy failed | `done` | The database row holds the new credential; the local spool keeps the previous one, and the running gateway is not updated, until the gateway's next start syncs the spool from the database (`Bootstrap`, `internal/store/postgresstore.go:168–175`). | The bucket holds the new credential; the local mirror keeps the previous one, and the running gateway is not updated, until the gateway's next start syncs the mirror from the bucket (`Bootstrap`, `internal/store/objectstore.go:142–152`). | (not applicable: the file is the store of record) | (not applicable: the local commit is written before the push) |
+| Stored, but registration with the running gateway failed | `done` | Stored in the database and the spool; used after the next load. | Stored in the bucket and the mirror; used after the next load. | Stored in the file; used after the next load. | Stored and pushed; used after the next load. |
+| Stored and registered | `done` | Stored and in use. | Stored and in use. | Stored and in use. | Stored and in use. |
+
+In the two partial `done` outcomes the gateway logs what did not follow and
+keeps it as a note in the login's record; no response field changes. Nothing
+stored is undone.
 
 ## Removed: the Codex browser login
 
