@@ -71,10 +71,10 @@ func TestCodexBrowserLoginStartIsRemoved(t *testing.T) {
 		t.Fatalf("the removed login registered %d OAuth sessions", sessions)
 	}
 	callbackForwardersMu.Lock()
-	_, forwarding := callbackForwarders[codexCallbackPort]
+	_, forwarding := callbackForwarders[1455]
 	callbackForwardersMu.Unlock()
 	if forwarding {
-		t.Fatalf("the removed login started the localhost:%d forwarder", codexCallbackPort)
+		t.Fatal("the removed login started the localhost:1455 forwarder")
 	}
 }
 

@@ -190,6 +190,8 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
+		mgmt.POST("/codex-device-login", s.mgmt.StartCodexDeviceLogin)
+		mgmt.GET("/codex-device-login", s.mgmt.GetCodexDeviceLoginStatus)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/kimi-ai-auth-url", s.mgmt.RequestKimiAIToken)

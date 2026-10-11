@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -61,42 +62,111 @@ func shouldUseCodexDeviceFlow(opts *LoginOptions) bool {
 	return strings.EqualFold(strings.TrimSpace(opts.Metadata[codexLoginModeMetadataKey]), codexLoginModeDevice)
 }
 
-func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+// Errors a Codex device login can end with. Their texts carry no code,
+// token or provider response body.
+var (
+	ErrCodexDeviceExpired         = errors.New("the device code expired before the login was completed")
+	ErrCodexDeviceRejected        = errors.New("OpenAI ended the device login")
+	ErrCodexDeviceUnreachable     = errors.New("OpenAI's device login could not be reached")
+	ErrCodexDeviceInvalidResponse = errors.New("OpenAI's device login answered without the authorization code")
+	ErrCodexDeviceExchangeFailed  = errors.New("exchanging the device authorization code for tokens failed")
+	ErrCodexDeviceMissingAccount  = errors.New("codex token storage missing account information")
+)
+
+// CodexDeviceOptions tunes a Codex device login started outside the CLI.
+// Zero values use the CLI's behavior: the proxy-aware client from the
+// configuration, the 15-minute limit and OpenAI's polling interval.
+type CodexDeviceOptions struct {
+	HTTPClient   *http.Client
+	Timeout      time.Duration
+	PollInterval time.Duration
+}
+
+// CodexDeviceLogin is a Codex device login OpenAI has issued a user code for.
+// VerificationURL and UserCode are for the person signing in; the device
+// auth id, which with the user code lets anyone poll for the authorization
+// code, stays unexported.
+type CodexDeviceLogin struct {
+	VerificationURL string
+	UserCode        string
+	ExpiresAt       time.Time
+
+	deviceAuthID string
+	interval     time.Duration
+}
+
+func (o CodexDeviceOptions) httpClient(cfg *config.Config) *http.Client {
+	if o.HTTPClient != nil {
+		return o.HTTPClient
+	}
+	return util.SetProxy(&cfg.SDKConfig, &http.Client{})
+}
+
+func (o CodexDeviceOptions) codexAuth(cfg *config.Config) *codex.CodexAuth {
+	if o.HTTPClient != nil {
+		return codex.NewCodexAuthWithHTTPClient(o.HTTPClient)
+	}
+	return codex.NewCodexAuth(cfg)
+}
+
+// StartCodexDeviceLogin asks OpenAI for a device user code. The login
+// expires after opts.Timeout (15 minutes by default).
+func StartCodexDeviceLogin(ctx context.Context, cfg *config.Config, opts CodexDeviceOptions) (*CodexDeviceLogin, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("cliproxy auth: configuration is required")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
-
-	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
+	userCodeResp, err := requestCodexDeviceUserCode(ctx, opts.httpClient(cfg))
 	if err != nil {
 		return nil, err
 	}
 
-	deviceCode := strings.TrimSpace(userCodeResp.UserCode)
-	if deviceCode == "" {
-		deviceCode = strings.TrimSpace(userCodeResp.UserCodeAlt)
+	userCode := strings.TrimSpace(userCodeResp.UserCode)
+	if userCode == "" {
+		userCode = strings.TrimSpace(userCodeResp.UserCodeAlt)
 	}
 	deviceAuthID := strings.TrimSpace(userCodeResp.DeviceAuthID)
-	if deviceCode == "" || deviceAuthID == "" {
+	if userCode == "" || deviceAuthID == "" {
 		return nil, fmt.Errorf("codex device flow did not return required fields")
 	}
 
-	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
-
-	fmt.Println("Starting Codex device authentication...")
-	fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
-	fmt.Printf("Codex device code: %s\n", deviceCode)
-
-	if !opts.NoBrowser {
-		if !browser.IsAvailable() {
-			log.Warn("No browser available; please open the device URL manually")
-		} else if errOpen := browser.OpenURL(codexDeviceVerificationURL); errOpen != nil {
-			log.Warnf("Failed to open browser automatically: %v", errOpen)
-		}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = codexDeviceTimeout
+	}
+	interval := opts.PollInterval
+	if interval <= 0 {
+		interval = parseCodexDevicePollInterval(userCodeResp.Interval)
 	}
 
-	tokenResp, err := pollCodexDeviceToken(ctx, httpClient, deviceAuthID, deviceCode, pollInterval)
+	return &CodexDeviceLogin{
+		VerificationURL: codexDeviceVerificationURL,
+		UserCode:        userCode,
+		ExpiresAt:       time.Now().Add(timeout),
+		deviceAuthID:    deviceAuthID,
+		interval:        interval,
+	}, nil
+}
+
+// CompleteCodexDeviceLogin polls OpenAI until the person signing in confirms
+// the user code, then exchanges the authorization code for tokens and builds
+// the auth record the CLI device login stores. It ends with ctx's error when
+// ctx is cancelled, and with one of the ErrCodexDevice errors otherwise.
+func (a *CodexAuthenticator) CompleteCodexDeviceLogin(ctx context.Context, cfg *config.Config, login *CodexDeviceLogin, opts CodexDeviceOptions) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("cliproxy auth: configuration is required")
+	}
+	if login == nil {
+		return nil, fmt.Errorf("codex device login is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	tokenResp, err := pollCodexDeviceToken(ctx, opts.httpClient(cfg), login)
 	if err != nil {
 		return nil, err
 	}
@@ -105,10 +175,10 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 	codeVerifier := strings.TrimSpace(tokenResp.CodeVerifier)
 	codeChallenge := strings.TrimSpace(tokenResp.CodeChallenge)
 	if authCode == "" || codeVerifier == "" || codeChallenge == "" {
-		return nil, fmt.Errorf("codex device flow token response missing required fields")
+		return nil, ErrCodexDeviceInvalidResponse
 	}
 
-	authSvc := codex.NewCodexAuth(cfg)
+	authSvc := opts.codexAuth(cfg)
 	authBundle, err := authSvc.ExchangeCodeForTokensWithRedirect(
 		ctx,
 		authCode,
@@ -119,10 +189,34 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		},
 	)
 	if err != nil {
-		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("%w: %w", ErrCodexDeviceExchangeFailed, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err))
 	}
 
 	return a.buildAuthRecord(authSvc, authBundle)
+}
+
+func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	login, err := StartCodexDeviceLogin(ctx, cfg, CodexDeviceOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println("Starting Codex device authentication...")
+	fmt.Printf("Codex device URL: %s\n", login.VerificationURL)
+	fmt.Printf("Codex device code: %s\n", login.UserCode)
+
+	if !opts.NoBrowser {
+		if !browser.IsAvailable() {
+			log.Warn("No browser available; please open the device URL manually")
+		} else if errOpen := browser.OpenURL(login.VerificationURL); errOpen != nil {
+			log.Warnf("Failed to open browser automatically: %v", errOpen)
+		}
+	}
+
+	return a.CompleteCodexDeviceLogin(ctx, cfg, login, CodexDeviceOptions{})
 }
 
 func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
@@ -168,17 +262,21 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	return &parsed, nil
 }
 
-func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID, userCode string, interval time.Duration) (*codexDeviceTokenResponse, error) {
-	deadline := time.Now().Add(codexDeviceTimeout)
-
+// pollCodexDeviceToken polls OpenAI's device-token endpoint until it issues
+// the authorization code. OpenAI answers 403 or 404 while the login is
+// pending; any other non-success status ends the login.
+func pollCodexDeviceToken(ctx context.Context, client *http.Client, login *CodexDeviceLogin) (*codexDeviceTokenResponse, error) {
 	for {
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("codex device authentication timed out after 15 minutes")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if !time.Now().Before(login.ExpiresAt) {
+			return nil, ErrCodexDeviceExpired
 		}
 
 		body, err := json.Marshal(codexDeviceTokenRequest{
-			DeviceAuthID: deviceAuthID,
-			UserCode:     userCode,
+			DeviceAuthID: login.deviceAuthID,
+			UserCode:     login.UserCode,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode codex device poll request: %w", err)
@@ -193,35 +291,42 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("failed to poll codex device token: %w", err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, ErrCodexDeviceUnreachable
 		}
 
 		respBody, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil {
-			return nil, fmt.Errorf("failed to read codex device poll response: %w", readErr)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, ErrCodexDeviceUnreachable
 		}
 
 		switch {
 		case codexDeviceIsSuccessStatus(resp.StatusCode):
 			var parsed codexDeviceTokenResponse
 			if err := json.Unmarshal(respBody, &parsed); err != nil {
-				return nil, fmt.Errorf("failed to decode codex device token response: %w", err)
+				return nil, ErrCodexDeviceInvalidResponse
 			}
 			return &parsed, nil
 		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound:
+			wait := min(login.interval, time.Until(login.ExpiresAt))
+			if wait < 0 {
+				wait = 0
+			}
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, ctx.Err()
-			case <-time.After(interval):
-				continue
+			case <-timer.C:
 			}
 		default:
-			trimmed := strings.TrimSpace(string(respBody))
-			if trimmed == "" {
-				trimmed = "empty response body"
-			}
-			return nil, fmt.Errorf("codex device token polling failed with status %d: %s", resp.StatusCode, trimmed)
+			return nil, fmt.Errorf("%w with status %d", ErrCodexDeviceRejected, resp.StatusCode)
 		}
 	}
 }
@@ -255,7 +360,7 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
 	if tokenStorage == nil || tokenStorage.Email == "" {
-		return nil, fmt.Errorf("codex token storage missing account information")
+		return nil, ErrCodexDeviceMissingAccount
 	}
 
 	planType := ""
@@ -301,13 +406,4 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 			"plan_type": planType,
 		},
 	}, nil
-}
-
-// CodexDeviceOptions tunes a Codex device login started outside the CLI.
-// Zero values use the CLI's behavior: the proxy-aware client from the
-// configuration, the 15-minute limit and OpenAI's polling interval.
-type CodexDeviceOptions struct {
-	HTTPClient   *http.Client
-	Timeout      time.Duration
-	PollInterval time.Duration
 }
