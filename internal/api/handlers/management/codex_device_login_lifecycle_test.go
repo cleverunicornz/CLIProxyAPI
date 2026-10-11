@@ -442,3 +442,65 @@ func TestOAuthCallbackPluginOpenAIStateInBodyKeepsItsCallback(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	assertCodexBrowserLoginRemoved(t, rec, "POST ?provider=openai with a built-in Codex state")
 }
+
+// R4-1: commits queue per account. A login of another account completes while
+// one account's store write hangs.
+func TestCodexDeviceLoginCommitOfAnotherAccountIsNotQueued(t *testing.T) {
+	h := newCodexDeviceHarness(t, 0)
+	hash, err := bcrypt.GenerateFromPassword([]byte(codexDeviceTestKey), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AuthDir: h.authDir}
+	cfg.RemoteManagement.SecretKey = string(hash)
+	handler := NewHandlerWithoutConfigFilePath(cfg, nil)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseStore := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseStore()
+	handler.tokenStore = &hangingSaveStore{FileTokenStore: sdkAuth.NewFileTokenStore(), hang: func(a *coreauth.Auth) bool {
+		return strings.Contains(a.FileName, "device-1@")
+	}, entered: entered, release: release}
+	router := gin.New()
+	g := router.Group("/v0/management", handler.Middleware())
+	g.POST("/codex-device-login", handler.StartCodexDeviceLogin)
+	g.GET("/codex-device-login", handler.GetCodexDeviceLoginStatus)
+	g.DELETE("/oauth-session", handler.CancelAuthSession)
+	h.router = router
+
+	first := h.start()["state"].(string)
+	h.fake.decide("CODE-0001", "approve")
+	pr9Wait(t, entered)
+	second := h.start()["state"].(string)
+	h.fake.decide("CODE-0002", "approve")
+	if done := h.waitStatus(second); done["status"] != "done" {
+		t.Fatalf("another account's login = %v while the first account's store write hangs, want done", done["status"])
+	}
+	if _, pending, raw := h.status(first); pending["status"] != "pending" {
+		t.Fatalf("the hung login = %s, want pending", raw)
+	}
+	releaseStore()
+	if done := h.waitStatus(first); done["status"] != "done" {
+		t.Fatalf("the first login after its store write resumed = %v, want done", done["status"])
+	}
+}
+
+// hangingSaveStore holds the first Save of a matching auth until released.
+type hangingSaveStore struct {
+	*sdkAuth.FileTokenStore
+	hang    func(*coreauth.Auth) bool
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *hangingSaveStore) Save(ctx context.Context, a *coreauth.Auth) (string, error) {
+	if s.hang(a) {
+		s.once.Do(func() {
+			close(s.entered)
+			<-s.release
+		})
+	}
+	return s.FileTokenStore.Save(ctx, a)
+}
