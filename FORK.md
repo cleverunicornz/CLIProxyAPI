@@ -106,7 +106,9 @@ answers a device login from its record. The Postgres and object stores now
 move a credential into their local mirror only after the remote write
 succeeded, so a refused write leaves the previous credential; a credential the
 store of record accepted is stored (`done`) even if publishing the local copy
-then fails, which the next start reconciles. `expires_at` is
+then fails, which the next start reconciles. Their save refuses a missing or
+empty staged credential and never deletes, so `done` follows only an actual
+credential write. `expires_at` is
 published to the nanosecond it is enforced. Failures carry at most an HTTP status, never a provider
 response body, and the removed routes leave no query string in the access log.
 
@@ -118,7 +120,8 @@ Pull request CI proves the tests fail at the test-first commits
 `89df64c9e9f202430ad969dc10fac7e2978b658d` (validator a234's findings),
 `9eb8f940ceb917f9e7e08bcdbf179df782aec39d` (validator a232's findings),
 `ec9955ec7076e614c76cc39112dec4b160b06bd3` (validator a249's round-4 findings)
-and `834c400aa13bf7d7558169af5d238cb5cfc55a33` (its round-5 findings), then
+`834c400aa13bf7d7558169af5d238cb5cfc55a33` (its round-5 findings) and
+`dbc80187f2ffc93dee94a17ccb1eccb11f004005` (its round-6 finding), then
 runs them and the race checks. OpenAI is played by an in-process fake; no
 request leaves CI.
 

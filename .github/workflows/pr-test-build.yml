@@ -222,6 +222,25 @@ jobs:
           done
           test "$(grep -c 'after the remote accepted the credential does not say it is stored' "$RUNNER_TEMP/codex-a249-r5-before.log")" = 8
           grep -q 'remote-accepted=true uploads=1 status=failed error=save_failed' "$RUNNER_TEMP/codex-a249-r5-before.log"
+      - name: Prove test-first failures of validator a249's round-6 finding
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a249-r6-before"
+          git worktree add --detach "$before_dir" dbc80187f2ffc93dee94a17ccb1eccb11f004005
+          cd "$before_dir"
+          set +e
+          go test ./internal/store -run '^TestA249R6PostgresDoneRequiresActualWrite$' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a249-r6-before.log"
+          store_status=${PIPESTATUS[0]}
+          go test -p 2 ./internal/api/handlers/management -run '^TestA249R6DoneRequiresActualObjectWrite$' -count=1 -v 2>&1 | tee -a "$RUNNER_TEMP/codex-a249-r6-before.log"
+          management_status=${PIPESTATUS[0]}
+          set -e
+          test "$store_status" = 1
+          test "$management_status" = 1
+          grep -q 'staging=empty reports-stored=true rows=0 writes=0 deletes=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
+          grep -q 'staging=missing status=done remote-auths=0 PUTs=0 DELETEs=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
+          grep -q 'staging=empty status=done remote-auths=0 PUTs=0 DELETEs=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
+          grep -q 'staging=normal status=done remote-auths=1 PUTs=1 DELETEs=0 restart-loaded=1' "$RUNNER_TEMP/codex-a249-r6-before.log"
       - name: Check formatting
         shell: bash
         run: |
@@ -252,7 +271,7 @@ jobs:
           go test -p 2 -race ./internal/api/handlers/management ./internal/api ./internal/logging ./internal/store ./internal/tui ./internal/auth/codex ./sdk/auth -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api -run '^TestValidatorPR9' -count=3
           go test -p 2 -race ./internal/api/handlers/management -run '^(TestA234|TestA232|TestA249)' -count=3
-          go test -p 2 -race ./internal/store -run '^(TestA249R5|TestRemoteStoreRefusal)' -count=3
+          go test -p 2 -race ./internal/store -run '^(TestA249R5|TestA249R6|TestRemoteStoreRefusal)' -count=3
           go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|CancelPast|LateCancelled|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)|TestA234(Published|CancelOutcome|ConcurrentCancel|Plugin|CancelCannot)' -count=10
       - name: Build portable server
         run: |
