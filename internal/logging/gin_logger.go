@@ -25,9 +25,18 @@ var aiAPIPrefixes = []string{
 }
 
 const (
-	skipGinLogKey  = "__gin_skip_request_logging__"
-	creditsUsedKey = "__antigravity_credits_used__"
+	skipGinLogKey   = "__gin_skip_request_logging__"
+	omitGinQueryKey = "__gin_omit_query_from_log__"
+	creditsUsedKey  = "__antigravity_credits_used__"
 )
+
+// OmitGinQueryLogging keeps the request's query string out of its access-log
+// line, for routes whose query may carry an authorization code.
+func OmitGinQueryLogging(c *gin.Context) {
+	if c != nil {
+		c.Set(omitGinQueryKey, true)
+	}
+}
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
@@ -70,6 +79,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 			return
 		}
 
+		if omit, _ := c.Get(omitGinQueryKey); omit == true {
+			raw = ""
+		}
 		if raw != "" {
 			path = path + "?" + raw
 		}

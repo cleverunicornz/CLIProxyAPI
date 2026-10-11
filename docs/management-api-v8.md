@@ -144,8 +144,12 @@ query parameter is required; Vertex is currently the supported import provider.
 
 The `/v0/management` endpoints keep their original paths and payloads, including
 provider-specific OAuth login URLs, callbacks, status queries, and cancellation.
-For example, `GET /v0/management/codex-auth-url` and
-`GET /v8/management/oauth/auth-url?provider=codex` start the same login flow.
+For example, `GET /v0/management/anthropic-auth-url` and
+`GET /v8/management/oauth/auth-url?provider=claude` start the same login flow.
+In this fork the Codex login is the device login only (infra-v2 I-000026):
+`GET /v0/management/codex-auth-url` and
+`GET /v8/management/oauth/auth-url?provider=codex` answer `410 Gone`; see
+[codex-device-login-management.md](codex-device-login-management.md).
 
 Legacy flat configuration endpoints such as `/debug`, `/request-retry`, and
 `/codex-api-key` exist under `/v0/management` only.

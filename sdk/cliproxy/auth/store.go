@@ -1,6 +1,15 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrMirrorNotUpdated marks a Save error that came after the store of record
+// accepted the auth: the auth is stored, but the store's local mirror (the
+// auth directory it serves files from) was not updated. The store's next
+// bootstrap reconciles the mirror from the store of record.
+var ErrMirrorNotUpdated = errors.New("auth stored; local mirror not updated")
 
 // Store abstracts persistence of Auth state across restarts.
 type Store interface {

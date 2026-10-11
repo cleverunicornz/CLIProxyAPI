@@ -14,10 +14,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const (
-	anthropicCallbackPort = 54545
-	codexCallbackPort     = 1455
-)
+const anthropicCallbackPort = 54545
 
 type callbackForwarder struct {
 	provider string

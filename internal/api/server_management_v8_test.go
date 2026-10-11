@@ -140,10 +140,15 @@ func TestManagementV8IndependentContract(t *testing.T) {
 			t.Fatalf("%s: body=%s, want %s", tc.url, got, tc.body)
 		}
 	}
+	// I-000026: the Codex browser login is removed; the device login replaces it.
+	const codexBrowserLoginRemoved = `{"device_login":"POST /v0/management/codex-device-login","error":"codex_browser_login_removed","message":"The Codex browser login is removed; use the device login.","status":"error"}`
+	for _, url := range []string{"/v8/management/oauth/auth-url?provider=codex", "/v0/management/codex-auth-url"} {
+		if got := request(http.MethodGet, url, "", http.StatusGone); got != codexBrowserLoginRemoved {
+			t.Fatalf("%s: body=%s, want %s", url, got, codexBrowserLoginRemoved)
+		}
+	}
 	for _, tc := range []struct{ url, provider string }{
-		{"/v8/management/oauth/auth-url?provider=codex", "codex"},
 		{"/v8/management/oauth/auth-url?provider=%20CLAUDE%20", "anthropic"},
-		{"/v0/management/codex-auth-url", "codex"},
 		{"/v0/management/anthropic-auth-url", "anthropic"},
 	} {
 		body := request(http.MethodGet, tc.url, "", http.StatusOK)
