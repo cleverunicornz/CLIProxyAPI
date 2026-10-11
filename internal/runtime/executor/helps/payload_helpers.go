@@ -75,7 +75,7 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
-	if shouldStripImageGeneration(cfg.DisableImageGeneration, requestPath) {
+	if shouldStripImageGeneration(cfg.EffectiveDisableImageGeneration(), requestPath) {
 		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
 		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}

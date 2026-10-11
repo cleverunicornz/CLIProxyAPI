@@ -45,7 +45,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	if errMsg := h.SessionMemberGateError(ctx, modelName); errMsg != nil {
+	if errMsg := h.SessionMemberGateError(ctx, modelName, rawJSON); errMsg != nil {
 		return nil, nil, errMsg
 	}
 	originalRequestedModel := modelName
@@ -127,7 +127,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	if errMsg := h.SessionMemberGateError(ctx, modelName); errMsg != nil {
+	if errMsg := h.SessionMemberGateError(ctx, modelName, rawJSON); errMsg != nil {
 		return nil, nil, errMsg
 	}
 	originalRequestedModel := modelName

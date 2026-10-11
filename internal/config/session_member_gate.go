@@ -34,3 +34,16 @@ func (c SessionMemberGateConfig) Annotation() string {
 	}
 	return DefaultSessionMemberAnnotation
 }
+
+// EffectiveDisableImageGeneration is the image generation mode requests run under: with the session member gate on,
+// image generation is off everywhere, so the gateway neither adds the image_generation tool nor forwards one a
+// session sent (an image model is not the session's member, D-000400 item 1).
+func (c *SDKConfig) EffectiveDisableImageGeneration() DisableImageGenerationMode {
+	if c == nil {
+		return DisableImageGenerationOff
+	}
+	if c.SessionMemberGate.Enabled {
+		return DisableImageGenerationAll
+	}
+	return c.DisableImageGeneration
+}

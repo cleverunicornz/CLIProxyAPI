@@ -4,12 +4,14 @@
 // The pod's token is verified by a Kubernetes TokenReview for the configured audience; the review names the pod
 // the token is bound to, and the live pod's member annotation (written only by the dashboard and immutable after
 // create) is the member. A harness can present only its own pod's token, so it can claim no other member.
+//
+// Nothing is cached: every request (and every websocket frame, through the registered resolver) is reviewed and
+// its pod read again, so a token the API server stops accepting, or a deleted or replaced pod, is refused at once.
 package sessionmember
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -24,7 +26,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
@@ -41,7 +42,6 @@ const AuthErrorCodeForbidden sdkaccess.AuthErrorCode = "session_member_forbidden
 const (
 	defaultTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultCAFile    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	reviewCacheTTL   = time.Minute
 	maxResponseBytes = 1 << 20
 	podNameExtra     = "authentication.kubernetes.io/pod-name"
 	podUIDExtra      = "authentication.kubernetes.io/pod-uid"
@@ -50,18 +50,16 @@ const (
 // memberPattern is the member form admission and the dashboard accept: an optional harness, then the model.
 var memberPattern = regexp.MustCompile(`^([a-z0-9-]+/)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
 
-// Register installs the provider when the gate is enabled and removes it otherwise.
+// Register installs the provider and its resolver when the gate is enabled and removes them otherwise.
 func Register(cfg *sdkconfig.SDKConfig) {
 	if cfg == nil || !cfg.SessionMemberGate.Enabled {
 		sdkaccess.UnregisterProvider(ProviderType)
+		sdkaccess.SetSessionMemberResolver(nil)
 		return
 	}
-	sdkaccess.RegisterProvider(ProviderType, newProvider(cfg.SessionMemberGate))
-}
-
-type cachedResult struct {
-	result  *sdkaccess.Result
-	expires time.Time
+	p := newProvider(cfg.SessionMemberGate)
+	sdkaccess.RegisterProvider(ProviderType, p)
+	sdkaccess.SetSessionMemberResolver(p.resolveRequest)
 }
 
 type provider struct {
@@ -69,14 +67,10 @@ type provider struct {
 	server    string
 	tokenFile string
 	caFile    string
-	nowFunc   func() time.Time
 
 	clientOnce sync.Once
 	client     *http.Client
 	clientErr  error
-
-	mu    sync.Mutex
-	cache map[[sha256.Size]byte]cachedResult
 }
 
 func newProvider(cfg internalconfig.SessionMemberGateConfig) *provider {
@@ -85,8 +79,6 @@ func newProvider(cfg internalconfig.SessionMemberGateConfig) *provider {
 		server:    strings.TrimRight(strings.TrimSpace(cfg.APIServer), "/"),
 		tokenFile: strings.TrimSpace(cfg.TokenFile),
 		caFile:    strings.TrimSpace(cfg.CAFile),
-		nowFunc:   time.Now,
-		cache:     make(map[[sha256.Size]byte]cachedResult),
 	}
 	if p.server == "" {
 		if host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT"); host != "" && port != "" {
@@ -113,17 +105,21 @@ func (p *provider) Authenticate(ctx context.Context, r *http.Request) (*sdkacces
 		log.Errorf("session member gate: %v", errConfig)
 		return nil, sdkaccess.NewInternalAuthError("session member gate is misconfigured", errConfig)
 	}
-
-	key := sha256.Sum256([]byte(token))
-	if result, ok := p.cached(key); ok {
-		return withSource(result, source), nil
-	}
 	result, authErr := p.resolve(ctx, token)
 	if authErr != nil {
 		return nil, authErr
 	}
-	p.store(key, result)
-	return withSource(result, source), nil
+	result.Metadata["source"] = source
+	return result, nil
+}
+
+// resolveRequest resolves the request's session token to its member again (sdkaccess.SessionMemberResolver).
+func (p *provider) resolveRequest(ctx context.Context, r *http.Request) (string, *sdkaccess.AuthError) {
+	result, authErr := p.Authenticate(ctx, r)
+	if authErr != nil {
+		return "", authErr
+	}
+	return result.Metadata[sdkaccess.MetadataSessionMember], nil
 }
 
 func (p *provider) configError() error {
@@ -308,38 +304,6 @@ func (p *provider) httpClient() (*http.Client, error) {
 		p.client = &http.Client{Transport: transport}
 	})
 	return p.client, p.clientErr
-}
-
-func (p *provider) cached(key [sha256.Size]byte) (*sdkaccess.Result, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	entry, ok := p.cache[key]
-	if !ok || !p.nowFunc().Before(entry.expires) {
-		return nil, false
-	}
-	return entry.result, true
-}
-
-func (p *provider) store(key [sha256.Size]byte, result *sdkaccess.Result) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.nowFunc()
-	for k, entry := range p.cache {
-		if !now.Before(entry.expires) {
-			delete(p.cache, k)
-		}
-	}
-	p.cache[key] = cachedResult{result: result, expires: now.Add(reviewCacheTTL)}
-}
-
-// withSource copies the cached result and records where this request carried the token.
-func withSource(result *sdkaccess.Result, source string) *sdkaccess.Result {
-	metadata := make(map[string]string, len(result.Metadata)+1)
-	for k, v := range result.Metadata {
-		metadata[k] = v
-	}
-	metadata["source"] = source
-	return &sdkaccess.Result{Provider: result.Provider, Principal: result.Principal, Metadata: metadata}
 }
 
 // presentedToken returns the credential as a bearer token or an Anthropic-style API key.

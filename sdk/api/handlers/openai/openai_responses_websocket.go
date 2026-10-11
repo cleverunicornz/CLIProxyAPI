@@ -625,7 +625,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if errMsg == nil {
 			// The session member gate's refusal reaches the client as an error event; an execution error with this
 			// status would only close the socket.
-			errMsg = h.SessionMemberGateError(executionParent, requestModelName)
+			errMsg = h.SessionMemberGateError(executionParent, requestModelName, payload)
 		}
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)

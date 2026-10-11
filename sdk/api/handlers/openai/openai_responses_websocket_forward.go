@@ -258,6 +258,10 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
+	// The session member gate's refusal is the client's to see; no reconnect changes it.
+	if coreauth.IsSessionMemberRefusal(errMsg.Error) {
+		return true
+	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
 }
 

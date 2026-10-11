@@ -26,11 +26,21 @@ var sessionMemberGateRoutes = map[string]struct{}{
 	"POST /backend-api/codex/responses/compact": {},
 }
 
+// sessionMemberGateEnabled reports whether the current configuration turns the session member gate on.
+func (s *Server) sessionMemberGateEnabled() bool {
+	cfg := s.getConfig()
+	return cfg != nil && cfg.SessionMemberGate.Enabled
+}
+
+// clientAuthMiddleware authenticates the client API routes; with the gate on, a failure is the gate's 403.
+func (s *Server) clientAuthMiddleware() gin.HandlerFunc {
+	return accessAuthMiddleware(s.accessManager, false, s.sessionMemberGateEnabled)
+}
+
 // sessionMemberRouteGate refuses, while the gate is on, every client API route outside sessionMemberGateRoutes.
 func (s *Server) sessionMemberRouteGate() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cfg := s.getConfig()
-		if cfg == nil || !cfg.SessionMemberGate.Enabled {
+		if !s.sessionMemberGateEnabled() {
 			c.Next()
 			return
 		}

@@ -340,27 +340,24 @@ func TestSessionMemberGateRefusesEveryUnresolvedIdentityWith403(t *testing.T) {
 	}
 }
 
-// F5: a tool or option that makes the upstream use another model is refused: the Responses image_generation tool
-// (with or without its own model, or forced through tool_choice) and any tool that names a model of its own, such as
-// Anthropic's advisor tool.
+// F5: a tool or option that makes the upstream use another model is refused: any tool that names a model of its own,
+// such as Anthropic's advisor tool, and a stored Responses prompt template.
 func TestSessionMemberGateRefusesToolsThatChooseAnotherModel(t *testing.T) {
 	cases := []struct{ name, path, token, body string }{
-		{"responses image tool with a model", "/v1/responses", codexSessionToken,
-			`{"model":"gpt-6-astra","input":"make an image","tools":[{"type":"image_generation","action":"generate","model":"gpt-image-2"}],"tool_choice":{"type":"image_generation"}}`},
-		{"responses image tool without a model", "/v1/responses", codexSessionToken,
-			`{"model":"gpt-6-astra","input":"make an image","tools":[{"type":"image_generation"}]}`},
-		{"responses forced image tool", "/v1/responses", codexSessionToken,
-			`{"model":"gpt-6-astra","input":"make an image","tool_choice":{"type":"image_generation"}}`},
-		{"codex direct image tool", "/backend-api/codex/responses", codexSessionToken,
-			`{"model":"gpt-6-astra","input":"make an image","tools":[{"type":"image_generation"}]}`},
-		{"chat completions image tool", "/v1/chat/completions", codexSessionToken,
-			`{"model":"gpt-6-astra","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"image_generation"}]}`},
 		{"a tool naming its own model", "/v1/responses", codexSessionToken,
 			`{"model":"gpt-6-astra","input":"hi","tools":[{"type":"web_search","model":"gpt-5.5-codex"}]}`},
+		{"a forced tool naming its own model", "/v1/responses", codexSessionToken,
+			`{"model":"gpt-6-astra","input":"hi","tool_choice":{"type":"web_search","model":"gpt-5.5-codex"}}`},
+		{"a stored prompt template", "/v1/responses", codexSessionToken,
+			`{"model":"gpt-6-astra","input":"hi","prompt":{"id":"pmpt_1","version":"2"}}`},
 		{"claude advisor tool", "/v1/messages", claudeSessionToken,
 			`{"model":"claude-opus-5-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"advisor_20260301","name":"advisor","model":"claude-sonnet-5-5"}]}`},
+		{"claude advisor tool without a model", "/v1/messages", claudeSessionToken,
+			`{"model":"claude-opus-5-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"advisor_20260301","name":"advisor"}]}`},
 		{"claude tool naming the member", "/v1/messages", claudeSessionToken,
 			`{"model":"claude-opus-5-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"custom","name":"x","model":"claude-opus-5-5","input_schema":{"type":"object"}}]}`},
+		{"a second tools key", "/v1/responses", codexSessionToken,
+			`{"model":"gpt-6-astra","input":"hi","tools":[],"tools":[{"type":"web_search","model":"gpt-5.5-codex"}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -373,26 +370,39 @@ func TestSessionMemberGateRefusesToolsThatChooseAnotherModel(t *testing.T) {
 	}
 }
 
-// F5: the gateway itself adds no image_generation tool to a session's request, and a function tool whose argument
-// schema has a property called model is not a model choice.
+// F5: the Responses image_generation tool runs an image model. The Codex CLI sends it by default, so it is not refused:
+// with the gate on the gateway strips it from tools and tool_choice before the upstream call and never adds it. A
+// function tool whose argument schema has a property called model is not a model choice.
 func TestSessionMemberGateSendsNoImageToolUpstream(t *testing.T) {
-	h := newMemberGateHarness(t, true)
-	upstream := useRealExecutor(t, h, "codex")
-	body := `{"model":"gpt-6-astra","input":"hi","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"model":{"type":"string"}}}}]}`
-	rec := h.do(t, http.MethodPost, "/v1/responses", codexSessionToken, body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("member request with a function tool: status = %d; body %s", rec.Code, rec.Body.String())
+	cases := []struct{ name, path, body string }{
+		{"no tools", "/v1/responses", `{"model":"gpt-6-astra","input":"hi"}`},
+		{"a function tool with a model argument", "/v1/responses",
+			`{"model":"gpt-6-astra","input":"hi","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"model":{"type":"string"}}}}]}`},
+		{"the image tool naming its model, forced", "/v1/responses",
+			`{"model":"gpt-6-astra","input":"make an image","tools":[{"type":"image_generation","action":"generate","model":"gpt-image-2"}],"tool_choice":{"type":"image_generation"}}`},
+		{"the image tool", "/backend-api/codex/responses",
+			`{"model":"gpt-6-astra","input":"make an image","tools":[{"type":"image_generation"}]}`},
+		{"the image tool on a stream", "/v1/responses",
+			`{"model":"gpt-6-astra","input":"make an image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`},
 	}
-	got := upstream.received()
-	if len(got) != 1 {
-		t.Fatalf("the upstream received %d requests, want 1", len(got))
-	}
-	if model := gjson.GetBytes(got[0], "model").String(); model != "gpt-6-astra" {
-		t.Fatalf("upstream model = %q, want gpt-6-astra", model)
-	}
-	for _, tool := range gjson.GetBytes(got[0], "tools").Array() {
-		if tool.Get("type").String() == "image_generation" {
-			t.Fatalf("the gateway added an image_generation tool: %s", got[0])
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newMemberGateHarness(t, true)
+			upstream := useRealExecutor(t, h, "codex")
+			rec := h.do(t, http.MethodPost, tc.path, codexSessionToken, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d; body %s", rec.Code, rec.Body.String())
+			}
+			got := upstream.received()
+			if len(got) != 1 {
+				t.Fatalf("the upstream received %d requests, want 1", len(got))
+			}
+			if model := gjson.GetBytes(got[0], "model").String(); model != "gpt-6-astra" {
+				t.Fatalf("upstream model = %q, want gpt-6-astra", model)
+			}
+			if strings.Contains(string(got[0]), "image_generation") || strings.Contains(string(got[0]), "gpt-image") {
+				t.Fatalf("an image tool or model reached the upstream: %s", got[0])
+			}
+		})
 	}
 }
