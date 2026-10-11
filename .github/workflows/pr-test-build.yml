@@ -52,11 +52,29 @@ jobs:
           grep -q -- '--- FAIL: TestAnthropicCodePageCallbackCompletesSession' "$RUNNER_TEMP/claude-before.log"
           grep -q 'token request redirect_uri = "http://localhost:54545/callback"' "$RUNNER_TEMP/claude-before.log"
           grep -q -- '--- PASS: TestRequestAnthropicTokenWebUIKeepsLocalhostRedirect' "$RUNNER_TEMP/claude-before.log"
+      - name: Prove test-first session member gate failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-before"
+          git worktree add --detach "$before_dir" 6076094b7b1a5458904b73c6ccd56f5bda417776
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/member-gate-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q -- '--- FAIL: TestSessionMemberGateServesTheClaudeMember' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateServesTheCodexMemberOnly' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesRequestsWithoutAResolvableMember' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q 'a plain client key: status = 200, want 403 from the session member gate' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q -- '--- PASS: TestSessionMemberGateOffKeepsClientKeys' "$RUNNER_TEMP/member-gate-before.log"
       - name: Check formatting
         shell: bash
         run: |
           test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
           test -z "$(gofmt -l internal/auth/claude internal/api/handlers/management)"
+          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go)"
           git diff --check
       - name: Verify fixed retention and handler compatibility
         run: |
@@ -68,6 +86,11 @@ jobs:
           go test -p 2 ./internal/auth/claude ./internal/api/handlers/management -run 'KeepsLocalhostRedirect|Anthropic' -count=1 -v
           go test -p 2 ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
           go test -p 2 -race ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
+      - name: Verify the session member gate
+        run: |
+          go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v
+          go test -p 2 ./internal/access/... ./internal/config ./sdk/access ./sdk/api/handlers ./sdk/api/handlers/openai ./internal/api ./sdk/cliproxy -count=1
+          go test -p 2 -race ./internal/access/... ./sdk/api/handlers ./internal/api -count=1
       - name: Build portable server
         run: |
           CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server
