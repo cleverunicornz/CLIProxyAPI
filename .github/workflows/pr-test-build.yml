@@ -69,12 +69,38 @@ jobs:
           grep -q -- '--- FAIL: TestSessionMemberGateRefusesRequestsWithoutAResolvableMember' "$RUNNER_TEMP/member-gate-before.log"
           grep -q 'a plain client key: status = 200, want 403 from the session member gate' "$RUNNER_TEMP/member-gate-before.log"
           grep -q -- '--- PASS: TestSessionMemberGateOffKeepsClientKeys' "$RUNNER_TEMP/member-gate-before.log"
+      - name: Prove test-first validator finding failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-findings-before"
+          git worktree add --detach "$before_dir" df1698194d35801beccbb17435a67b68f1a74caf
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/member-gate-findings-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          log="$RUNNER_TEMP/member-gate-findings-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesAmbiguousModelFields ' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesAmbiguousModelFieldsOnTheWebsocket' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesAliasesToAnotherModel' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesOnceTheIdentityIsGone' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateReverifiesEachWebsocketFrame' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesEveryUnresolvedIdentityWith403' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateSendsNoImageToolUpstream' "$log"
+          grep -q 'duplicate key: status = 200, want 403 from the session member gate' "$log"
+          grep -q 'codex alias gpt-6-astra -> gpt-5.5-codex: status = 200, want 403' "$log"
+          grep -q 'after deleted: status = 200, want 403' "$log"
+          grep -q 'unknown-key: status = 401, want 403' "$log"
+          grep -q 'the gateway added an image_generation tool' "$log"
+          grep -q -- '--- PASS: TestSessionMemberGateOffKeepsClientKeys' "$log"
       - name: Check formatting
         shell: bash
         run: |
           test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
           test -z "$(gofmt -l internal/auth/claude internal/api/handlers/management)"
-          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go)"
+          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go)"
           git diff --check
       - name: Verify fixed retention and handler compatibility
         run: |
@@ -89,8 +115,8 @@ jobs:
       - name: Verify the session member gate
         run: |
           go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v
-          go test -p 2 ./internal/access/... ./internal/config ./sdk/access ./sdk/api/handlers ./sdk/api/handlers/openai ./internal/api ./sdk/cliproxy -count=1
-          go test -p 2 -race ./internal/access/... ./sdk/api/handlers ./internal/api -count=1
+          go test -p 2 ./internal/access/... ./internal/config ./sdk/access ./sdk/api/handlers/... ./internal/api ./sdk/cliproxy/... ./internal/runtime/executor/... -count=1
+          go test -p 2 -race ./internal/access/... ./sdk/access ./sdk/api/handlers ./internal/api ./sdk/cliproxy/auth -count=1
       - name: Build portable server
         run: |
           CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server
