@@ -199,6 +199,29 @@ jobs:
           grep -q 'unrelated-query=true status=410 callback=false' "$RUNNER_TEMP/codex-a249-before.log"
           grep -q 'status=failed error=save_failed local-auths=1' "$RUNNER_TEMP/codex-a249-before.log"
           grep -q 'want the previous one' "$RUNNER_TEMP/codex-a249-before.log"
+      - name: Prove test-first failures of validator a249's round-5 findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a249-r5-before"
+          git worktree add --detach "$before_dir" 834c400aa13bf7d7558169af5d238cb5cfc55a33
+          cd "$before_dir"
+          set +e
+          go test ./internal/store -run '^TestA249R5' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a249-r5-before.log"
+          store_status=${PIPESTATUS[0]}
+          go test -p 2 ./internal/api/handlers/management -run '^TestA249R5' -count=1 -v 2>&1 | tee -a "$RUNNER_TEMP/codex-a249-r5-before.log"
+          management_status=${PIPESTATUS[0]}
+          set -e
+          test "$store_status" = 1
+          test "$management_status" = 1
+          for name in TestA249R5RemoteMirrorWriteBoundaries TestA249R5RemoteAcceptedButMirrorPublicationFailed; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a249-r5-before.log"
+          done
+          for name in TestA249R5RemoteBackendLockBlocksDifferentAuth TestA249R5RemoteStoreBlocksOtherAccount TestA249R5DoneAuthFilesVisibilityAfterRegistrationFailure; do
+            grep -q -- "--- PASS: $name " "$RUNNER_TEMP/codex-a249-r5-before.log"
+          done
+          test "$(grep -c 'after the remote accepted the credential does not say it is stored' "$RUNNER_TEMP/codex-a249-r5-before.log")" = 8
+          grep -q 'remote-accepted=true uploads=1 status=failed error=save_failed' "$RUNNER_TEMP/codex-a249-r5-before.log"
       - name: Check formatting
         shell: bash
         run: |
@@ -229,6 +252,7 @@ jobs:
           go test -p 2 -race ./internal/api/handlers/management ./internal/api ./internal/logging ./internal/store ./internal/tui ./internal/auth/codex ./sdk/auth -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api -run '^TestValidatorPR9' -count=3
           go test -p 2 -race ./internal/api/handlers/management -run '^(TestA234|TestA232|TestA249)' -count=3
+          go test -p 2 -race ./internal/store -run '^(TestA249R5|TestRemoteStoreRefusal)' -count=3
           go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|CancelPast|LateCancelled|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)|TestA234(Published|CancelOutcome|ConcurrentCancel|Plugin|CancelCannot)' -count=10
       - name: Build portable server
         run: |

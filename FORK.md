@@ -104,7 +104,9 @@ undone, and a crash before the commit leaves nothing. Commits queue per account,
 and a cancelled queued login leaves the queue at once. `get-auth-status`
 answers a device login from its record. The Postgres and object stores now
 move a credential into their local mirror only after the remote write
-succeeded, so a refused write leaves the previous credential. `expires_at` is
+succeeded, so a refused write leaves the previous credential; a credential the
+store of record accepted is stored (`done`) even if publishing the local copy
+then fails, which the next start reconciles. `expires_at` is
 published to the nanosecond it is enforced. Failures carry at most an HTTP status, never a provider
 response body, and the removed routes leave no query string in the access log.
 
@@ -114,8 +116,9 @@ Pull request CI proves the tests fail at the test-first commits
 `72f9a86cfc2785bb1bce928f2373b54862b5534f` (TUI) and
 `e6a71996eab2e49d45992b1927963b355da197e9` (validator a216's findings),
 `89df64c9e9f202430ad969dc10fac7e2978b658d` (validator a234's findings),
-`9eb8f940ceb917f9e7e08bcdbf179df782aec39d` (validator a232's findings) and
-`ec9955ec7076e614c76cc39112dec4b160b06bd3` (validator a249's findings), then
+`9eb8f940ceb917f9e7e08bcdbf179df782aec39d` (validator a232's findings),
+`ec9955ec7076e614c76cc39112dec4b160b06bd3` (validator a249's round-4 findings)
+and `834c400aa13bf7d7558169af5d238cb5cfc55a33` (its round-5 findings), then
 runs them and the race checks. OpenAI is played by an in-process fake; no
 request leaves CI.
 
