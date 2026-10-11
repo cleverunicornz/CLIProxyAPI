@@ -75,6 +75,52 @@ the redirect URI. Pull request CI proves the tests fail at the test-first commit
 `04bc849836b5b2557630126e7204599abeb57c12`, then runs them, the Claude auth,
 management handler and SDK auth packages, and the race checks.
 
+## Session member gate
+
+Fork-only, for the v2 gateways (operator's rule of 2026-10-11: a session keeps
+one model for its whole life, and the v2 gateway refuses inference for any
+model other than the session's member). Off unless the config sets it:
+
+```yaml
+access:
+  session-member-gate:
+    enabled: true
+    audience: cliproxy            # the session token's audience
+    namespace: agent-sessions-v2  # the session pods' ServiceAccount
+    service-account: agent-session
+    # member-annotation: cvu.cleverunicorn.io/member (default)
+    # api-server, token-file, ca-file: the in-cluster defaults
+```
+
+A session pod presents its projected ServiceAccount token as its client key
+(`Authorization: Bearer` or `x-api-key`). The `session-member` access provider
+verifies it with a TokenReview for the audience, requires the session
+ServiceAccount, reads the pod the token is bound to (its uid must match) and
+takes the member, `<harness>/<model>`, from the pod's annotation. The
+dashboard alone writes that annotation and admission keeps it unchanged after
+create, and a harness can present only its own pod's token, so it can claim no
+other member. A review is reused for one minute per token hash. The gateway's
+ServiceAccount needs `create` on `tokenreviews` and `get` on pods in the
+session namespace.
+
+With the gate on:
+
+- the three execution functions of `sdk/api/handlers` (non-stream, token
+  count, stream), through which every chat, messages and responses route
+  runs, refuse with 403 a model other than the member's model (case and a
+  thinking suffix are ignored) and any request without a session member,
+  whatever client key it presents. The Responses websocket runs the same check
+  before execution, so the client receives the refusal as an error event;
+- client API routes that reach upstream credentials outside those functions
+  (realtime, live, alpha search, images, videos, Gemini generation) are
+  refused with 403. The model lists stay open, so a plain client key still
+  serves the readiness probe.
+
+Pull request CI proves the gate tests fail at the test-first commit
+`6076094b7b1a5458904b73c6ccd56f5bda417776` (session tokens refused, a plain key
+served) while the gate-off control passes, then runs them, the affected
+packages and race checks.
+
 ## Releases
 
 The fork publishes its own GitHub releases from `internal/main` through
