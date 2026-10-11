@@ -238,8 +238,22 @@ func (h *codexDeviceHarness) start() map[string]any {
 		h.t.Fatalf("start status = %d, body %s", code, raw)
 	}
 	state, _ := body["state"].(string)
-	h.t.Cleanup(func() { CancelOAuthSession(state) })
+	h.t.Cleanup(func() { h.cancelAndWait(state) })
 	return body
+}
+
+// cancelAndWait ends a login the test left running and waits for its poller,
+// so no goroutine of this test outlives it.
+func (h *codexDeviceHarness) cancelAndWait(state string) {
+	codexDeviceLogins.cancel(state)
+	CancelOAuthSession(state)
+	if done := codexDeviceLogins.watcherDone(state); done != nil {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			h.t.Errorf("device-login watcher for %s did not finish", state)
+		}
+	}
 }
 
 func (h *codexDeviceHarness) status(state string) (int, map[string]any, string) {
@@ -315,7 +329,7 @@ func TestCodexDeviceLoginStartReturnsCodeWithoutDeviceSecret(t *testing.T) {
 		t.Fatalf("start status = %d, body %s", code, raw)
 	}
 	state, _ := body["state"].(string)
-	t.Cleanup(func() { CancelOAuthSession(state) })
+	t.Cleanup(func() { h.cancelAndWait(state) })
 	assertNoSecrets(t, raw)
 	if !codexDeviceStatePattern.MatchString(state) {
 		t.Fatalf("state = %q, want codex-device-<32 hex>", state)

@@ -5,16 +5,19 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -194,6 +197,91 @@ func (s *codexDeviceLoginStore) watcherDone(state string) <-chan struct{} {
 	return nil
 }
 
+// codexDeviceCredentials orders what device logins do to their stored
+// credentials. Logins of the same account share one credential (its file
+// name comes from the account), so a cancelled login's rollback must not
+// remove, or leave its own stale write over, a credential another login has
+// committed meanwhile. Its lock serializes every commit and rollback;
+// committed holds, per credential name, the record last committed and when.
+var codexDeviceCredentials = struct {
+	mu        sync.Mutex
+	committed map[string]codexDeviceCommit
+}{committed: make(map[string]codexDeviceCommit)}
+
+type codexDeviceCommit struct {
+	record *coreauth.Auth
+	at     time.Time
+}
+
+func codexDeviceAccessToken(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
+		return storage.AccessToken
+	}
+	token, _ := auth.Metadata["access_token"].(string)
+	return token
+}
+
+// storedCodexDeviceCredential reads back what the store holds under record's
+// credential name: nil when it holds none; ok is false when the store could
+// not be read.
+func (h *Handler) storedCodexDeviceCredential(ctx context.Context, record *coreauth.Auth) (stored *coreauth.Auth, ok bool) {
+	store := h.tokenStoreWithBaseDir()
+	if store == nil {
+		return nil, false
+	}
+	auths, errList := store.List(ctx)
+	if errList != nil {
+		return nil, false
+	}
+	name := filepath.Base(record.FileName)
+	for _, auth := range auths {
+		if auth != nil && (filepath.Base(auth.FileName) == name || filepath.Base(auth.ID) == name) {
+			return auth, true
+		}
+	}
+	return nil, true
+}
+
+// codexDeviceSave is one device login's write of its credential: what the
+// store held under that name just before (previous), and when it began.
+type codexDeviceSave struct {
+	record   *coreauth.Auth
+	path     string
+	previous *coreauth.Auth
+	began    time.Time
+}
+
+// rollbackCodexDeviceSaveLocked undoes a cancelled login's save. It touches the
+// stored credential only while it is still this login's write, and puts back
+// what that write replaced: the credential another login committed after this
+// save began, else the credential stored before it, else nothing. Callers hold
+// codexDeviceCredentials.mu.
+func (h *Handler) rollbackCodexDeviceSaveLocked(ctx context.Context, state string, save codexDeviceSave) {
+	stored, ok := h.storedCodexDeviceCredential(ctx, save.record)
+	switch {
+	case !ok:
+		log.WithField("state", state).Warn("codex device login: could not read the stored auth back; the cancelled login's write is left in place")
+		return
+	case stored == nil || codexDeviceAccessToken(stored) != codexDeviceAccessToken(save.record):
+		// Gone already, or another login's credential now: not ours to undo.
+		return
+	}
+	restore := save.previous
+	if commit, found := codexDeviceCredentials.committed[filepath.Base(save.record.FileName)]; found && commit.at.After(save.began) {
+		restore = commit.record
+	}
+	if restore == nil {
+		h.rollbackSavedTokenRecords(ctx, []string{save.path})
+		return
+	}
+	if _, errSave := h.saveTokenRecord(ctx, restore); errSave != nil {
+		log.WithField("state", state).Error("codex device login: failed to put back the auth a cancelled login's write replaced")
+	}
+}
+
 // StartCodexDeviceLogin starts a Codex device login: POST
 // /v0/management/codex-device-login. The answer carries the verification URL
 // and the user code to show, never OpenAI's device auth id.
@@ -242,7 +330,7 @@ func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 		"url":              login.VerificationURL,
 		"user_code":        login.UserCode,
 		"expires_in":       int(math.Ceil(time.Until(login.ExpiresAt).Seconds())),
-		"expires_at":       login.ExpiresAt.UTC().Format(time.RFC3339),
+		"expires_at":       login.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	})
 }
 
@@ -251,9 +339,11 @@ func (h *Handler) StartCodexDeviceLogin(c *gin.Context) {
 // state; the SDK bounds polling and the exchange by the login's expiry. The
 // store's transitions decide whether the auth may be saved and kept.
 func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop context.CancelFunc, done chan struct{}, state string, login *sdkAuth.CodexDeviceLogin, opts sdkAuth.CodexDeviceOptions) {
+	var watchers sync.WaitGroup
 	defer close(done)
+	defer watchers.Wait()
 	defer stop()
-	go watchOAuthSessionCancel(runCtx, stop, state, "codex")
+	watchers.Go(func() { watchOAuthSessionCancel(runCtx, stop, state, "codex") })
 	pending := []string{codexDeviceStatusPending}
 
 	authenticator := sdkAuth.NewCodexAuthenticator()
@@ -280,7 +370,12 @@ func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop con
 		// Cancelled or expired while OpenAI answered: nothing is saved.
 		return
 	}
+	save := codexDeviceSave{record: record, began: time.Now()}
+	if previous, ok := h.storedCodexDeviceCredential(ctx, record); ok {
+		save.previous = previous
+	}
 	savedPath, errSave := h.saveTokenRecord(runCtx, record)
+	save.path = savedPath
 	if errSave != nil {
 		message := "Failed to save authentication tokens"
 		if codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusFailed, nil, "save_failed", message) {
@@ -288,7 +383,9 @@ func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop con
 			log.WithField("state", state).Error("codex device login: failed to save the auth")
 		}
 		if savedPath != "" {
-			h.rollbackSavedTokenRecords(ctx, []string{savedPath})
+			codexDeviceCredentials.mu.Lock()
+			h.rollbackCodexDeviceSaveLocked(ctx, state, save)
+			codexDeviceCredentials.mu.Unlock()
 		}
 		return
 	}
@@ -296,12 +393,23 @@ func (h *Handler) completeCodexDeviceLogin(ctx, runCtx context.Context, stop con
 	email, _ := record.Metadata["email"].(string)
 	planType, _ := record.Metadata["plan_type"].(string)
 	account := &codexDeviceAccount{Email: email, PlanType: planType, Name: record.FileName}
+	codexDeviceCredentials.mu.Lock()
+	defer codexDeviceCredentials.mu.Unlock()
 	if !codexDeviceLogins.transition(state, []string{codexDeviceStatusSaving}, codexDeviceStatusDone, account, "", "") {
-		// A cancel was accepted while the auth was being stored: remove it.
-		h.rollbackSavedTokenRecords(ctx, []string{savedPath})
-		log.WithField("state", state).Info("codex device login cancelled during its save; the stored auth was removed")
+		// A cancel was accepted while the auth was being stored: undo this
+		// login's write, and only this login's.
+		h.rollbackCodexDeviceSaveLocked(ctx, state, save)
+		log.WithField("state", state).Info("codex device login cancelled during its save; its write was undone")
 		return
 	}
+	// Committed. A cancelled login's late write or rollback may have replaced
+	// the credential since this login wrote it: make sure it is this login's.
+	if stored, ok := h.storedCodexDeviceCredential(ctx, record); ok && (stored == nil || codexDeviceAccessToken(stored) != codexDeviceAccessToken(record)) {
+		if _, errResave := h.saveTokenRecord(ctx, record); errResave != nil {
+			log.WithField("state", state).Error("codex device login: failed to store the committed auth again")
+		}
+	}
+	codexDeviceCredentials.committed[filepath.Base(record.FileName)] = codexDeviceCommit{record: record, at: time.Now()}
 	CompleteOAuthSession(state)
 	log.WithField("state", state).Info("codex device login stored an auth")
 }
@@ -348,7 +456,7 @@ func (h *Handler) GetCodexDeviceLoginStatus(c *gin.Context) {
 	body := gin.H{
 		"state":      state,
 		"status":     status,
-		"expires_at": record.expiresAt.UTC().Format(time.RFC3339),
+		"expires_at": record.expiresAt.UTC().Format(time.RFC3339Nano),
 	}
 	switch status {
 	case codexDeviceStatusPending:

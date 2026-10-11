@@ -24,12 +24,13 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	if isCodexProviderName(c.Query("provider")) {
+	var req oauthCallbackRequest
+	errBindJSON := c.ShouldBindJSON(&req)
+	if isCodexProviderName(c.Query("provider")) && !isPluginOAuthState(firstNonEmpty(c.Query("state"), req.State)) {
 		RespondCodexBrowserLoginRemoved(c)
 		return
 	}
-	var req oauthCallbackRequest
-	if errBindJSON := c.ShouldBindJSON(&req); errBindJSON != nil {
+	if errBindJSON != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
 		return
 	}
@@ -37,7 +38,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 }
 
 func (h *Handler) GetOAuthCallback(c *gin.Context) {
-	if isCodexProviderName(c.Query("provider")) {
+	if isCodexProviderName(c.Query("provider")) && !isPluginOAuthState(c.Query("state")) {
 		RespondCodexBrowserLoginRemoved(c)
 		return
 	}
@@ -161,6 +162,13 @@ func isCodexProviderName(provider string) bool {
 	}
 	normalized, errNormalize := NormalizeOAuthProvider(trimmed)
 	return errNormalize == nil && normalized == "codex"
+}
+
+// isPluginOAuthState reports a known plugin login's state; a plugin keeps its
+// own provider name, openai included.
+func isPluginOAuthState(state string) bool {
+	_, _, isPlugin, _, _, known := GetOAuthSessionDetails(strings.TrimSpace(state))
+	return known && isPlugin
 }
 
 // isCodexBrowserCallback reports a callback of the removed Codex browser
