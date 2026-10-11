@@ -302,3 +302,12 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 		},
 	}, nil
 }
+
+// CodexDeviceOptions tunes a Codex device login started outside the CLI.
+// Zero values use the CLI's behavior: the proxy-aware client from the
+// configuration, the 15-minute limit and OpenAI's polling interval.
+type CodexDeviceOptions struct {
+	HTTPClient   *http.Client
+	Timeout      time.Duration
+	PollInterval time.Duration
+}
