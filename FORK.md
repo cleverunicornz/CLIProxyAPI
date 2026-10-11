@@ -171,17 +171,27 @@ them, the affected packages and race checks.
 
 ## Request body bound
 
-Fork-only, with the session member gate on or off. A client request body is
-bounded as received and after each `Content-Encoding` decoding stage, while it
-streams, so a small compressed body cannot expand into memory: past the bound
-it is refused with 413 before any execution (by the session member gate, and
-by the OpenAI chat, completions, responses and images handlers; a body that is
-not decoded, on the Claude and Gemini routes, is read as upstream reads it).
-The bound is `requests.max-body-mb`, default 64 MiB: above the providers' own
-maxima (Anthropic's Messages API refuses requests over 32 MB; OpenAI accepts at
-most 50 MB of image input per request), with room for JSON framing. A negative
-value removes it. Upstream reads the body and its decoded form whole, so with
-the gate off this differs from upstream only for bodies over the bound.
+Fork-only, with the session member gate on or off (the operator's decision of
+2026-10-11). A client request body is bounded as received and after each
+`Content-Encoding` decoding stage, while it streams, so a small compressed body
+cannot expand into memory. The bound is `requests.max-body-mb`, default 64 MiB:
+above the providers' own maxima (Anthropic's Messages API refuses requests over
+32 MB; OpenAI accepts at most 50 MB of image input per request), with room for
+JSON framing. A negative value removes it.
+
+Past the bound a request is refused before any execution:
+
+- with the gate on, by the session member gate, with 413, on every inference
+  route it admits;
+- with the gate off, by the OpenAI chat, completions, responses and images
+  handlers with 413, and by the video handlers with 400 (they report every body
+  read error as 400).
+
+**Difference from upstream with the gate off:** upstream reads such a body, and
+its decoded form, whole and executes it; this fork answers 413 (400 on the
+video routes) instead. Only bodies over the bound are affected, which the
+providers refuse anyway. A body that is not decoded, on the Claude and Gemini
+routes, is still read as upstream reads it, without a bound.
 
 ## Releases
 
