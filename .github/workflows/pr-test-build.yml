@@ -95,12 +95,40 @@ jobs:
           grep -q 'unknown-key: status = 401, want 403' "$log"
           grep -q 'the gateway added an image_generation tool' "$log"
           grep -q -- '--- PASS: TestSessionMemberGateOffKeepsClientKeys' "$log"
+      - name: Prove test-first round-2 finding failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-round2-before"
+          git worktree add --detach "$before_dir" 3526f7ffb6e7de70635c7382de40ef9ad57b2732
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api -run 'SessionMemberGateR2' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/member-gate-round2-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          log="$RUNNER_TEMP/member-gate-round2-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2DuplexFramesStillApplyTheGate' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2NestedDuplicateToolType' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2WebsocketNestedDuplicateToolType' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2StrippingLeavesUsableToolChoice' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2StrictRootVariants' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2LegacyCompletionsStreamStrict' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2ChatCompletionsResponsesFormatStrict' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2RefusesRepeatedKeysAtAnyDepth' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2StrippingKeepsTheOtherAllowedTools' "$log"
+          grep -q 'duplex continuation skipped the member gate' "$log"
+          grep -q 'duplicate nested type defeats final image stripping' "$log"
+          grep -q 'stripped image request retains an unsatisfiable tool choice' "$log"
+          grep -q 'streaming legacy completions skipped the strict root decoder' "$log"
+          grep -q -- '--- PASS: TestSessionMemberGateR2NeutralNestedFieldsKeepMember' "$log"
+          grep -q -- '--- PASS: TestSessionMemberGateR2WebsocketAppendAndOtherFrames' "$log"
       - name: Check formatting
         shell: bash
         run: |
           test -z "$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go)"
           test -z "$(gofmt -l internal/auth/claude internal/api/handlers/management)"
-          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go)"
+          test -z "$(gofmt -l internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go internal/api/server_session_member_gate_round2_test.go sdk/api/handlers/openai/openai_responses_websocket.go sdk/api/handlers/openai/openai_responses_websocket_input.go)"
           git diff --check
       - name: Verify fixed retention and handler compatibility
         run: |
