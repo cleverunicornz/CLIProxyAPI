@@ -293,7 +293,14 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		_ = os.Remove(tmp)
 		return "", err
 	}
-	if err = s.upsertAuthRecord(ctx, relID, tmp); err != nil {
+	data, err := readStagedCredential(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("postgres store: %w", err)
+	}
+	// An insert or update of the credential row only: unlike upsertAuthRecord,
+	// a save never deletes the row.
+	if err = s.persistAuth(ctx, relID, data); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}

@@ -336,6 +336,12 @@ What a commit leaves, by outcome and token store:
 | Stored, but registration with the running gateway failed | `done` | Stored in the database and the spool; used after the next load. | Stored in the bucket and the mirror; used after the next load. | Stored in the file; used after the next load. | Stored and pushed; used after the next load. |
 | Stored and registered | `done` | Stored and in use. | Stored and in use. | Stored and in use. | Stored and in use. |
 
+The Postgres and object stores read the staged credential before touching the
+store of record and refuse a save whose staged credential is missing or empty;
+their save writes the credential (an insert or update, a PUT) and never
+deletes. So a login is `done` only after an actual credential write was
+accepted.
+
 In the two partial `done` outcomes the gateway logs what did not follow and
 keeps it as a note in the login's record; no response field changes. Nothing
 stored is undone.

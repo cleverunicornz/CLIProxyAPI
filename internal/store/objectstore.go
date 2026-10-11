@@ -237,7 +237,14 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		auth.FileName = auth.ID
 	}
 
-	if err = s.uploadAuthFrom(ctx, path, tmp); err != nil {
+	data, err := readStagedCredential(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("object store: %w", err)
+	}
+	// A PUT of the credential only: unlike uploadAuth, a save never deletes
+	// the remote object.
+	if err = s.putAuthObject(ctx, path, data); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}
@@ -463,11 +470,6 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 }
 
 func (s *ObjectTokenStore) uploadAuth(ctx context.Context, path string) error {
-	return s.uploadAuthFrom(ctx, path, path)
-}
-
-// uploadAuthFrom uploads the content of source as the auth object of path.
-func (s *ObjectTokenStore) uploadAuthFrom(ctx context.Context, path, source string) error {
 	if path == "" {
 		return nil
 	}
@@ -475,7 +477,7 @@ func (s *ObjectTokenStore) uploadAuthFrom(ctx context.Context, path, source stri
 	if err != nil {
 		return fmt.Errorf("object store: resolve auth relative path: %w", err)
 	}
-	data, err := os.ReadFile(source)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteAuthObject(ctx, path)
@@ -484,6 +486,16 @@ func (s *ObjectTokenStore) uploadAuthFrom(ctx context.Context, path, source stri
 	}
 	if len(data) == 0 {
 		return s.deleteAuthObject(ctx, path)
+	}
+	key := objectStoreAuthPrefix + "/" + filepath.ToSlash(rel)
+	return s.putObject(ctx, key, data, "application/json")
+}
+
+// putAuthObject writes data as the auth object of path, and only writes.
+func (s *ObjectTokenStore) putAuthObject(ctx context.Context, path string, data []byte) error {
+	rel, err := filepath.Rel(s.authDir, path)
+	if err != nil {
+		return fmt.Errorf("object store: resolve auth relative path: %w", err)
 	}
 	key := objectStoreAuthPrefix + "/" + filepath.ToSlash(rel)
 	return s.putObject(ctx, key, data, "application/json")
