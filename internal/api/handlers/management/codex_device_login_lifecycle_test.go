@@ -306,3 +306,23 @@ func TestOAuthCallbackRefusesCodexBeforeValidation(t *testing.T) {
 		assertCodexBrowserLoginRemoved(t, rec, tc.method+" "+tc.target+" "+tc.body)
 	}
 }
+
+// docs/codex-device-login-management.md, Cancel: a pending login past its
+// expiry answers cancelled false and reads expired.
+func TestCodexDeviceLoginCancelPastExpiryIsRefused(t *testing.T) {
+	h := newCodexDeviceHarness(t, 100*time.Millisecond)
+	state := h.start()["state"].(string)
+	record, ok := codexDeviceLogins.get(state)
+	if !ok {
+		t.Fatal("missing login")
+	}
+	<-time.After(time.Until(record.expiresAt) + 10*time.Millisecond)
+	code, cancel, raw := h.do(http.MethodDelete, "/v0/management/oauth-session?state="+state, true)
+	if code != http.StatusOK || cancel["cancelled"] != false {
+		t.Fatalf("cancel past expiry = %d %s, want cancelled false", code, raw)
+	}
+	h.waitWatcher(state)
+	if _, after, rawAfter := h.status(state); after["status"] != "expired" {
+		t.Fatalf("status = %s, want expired", rawAfter)
+	}
+}

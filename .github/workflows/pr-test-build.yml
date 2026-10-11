@@ -148,7 +148,7 @@ jobs:
           go test -p 2 ./internal/api/... ./internal/logging ./internal/tui ./internal/auth/codex ./internal/cmd ./sdk/auth ./sdk/api/... -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api ./internal/logging ./internal/tui ./internal/auth/codex ./sdk/auth -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api -run '^TestValidatorPR9' -count=3
-          go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)' -count=10
+          go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|CancelPast|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)' -count=10
       - name: Build portable server
         run: |
           CGO_ENABLED=0 go build -p 2 -o test-output ./cmd/server
