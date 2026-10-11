@@ -52,6 +52,102 @@ jobs:
           grep -q -- '--- FAIL: TestAnthropicCodePageCallbackCompletesSession' "$RUNNER_TEMP/claude-before.log"
           grep -q 'token request redirect_uri = "http://localhost:54545/callback"' "$RUNNER_TEMP/claude-before.log"
           grep -q -- '--- PASS: TestRequestAnthropicTokenWebUIKeepsLocalhostRedirect' "$RUNNER_TEMP/claude-before.log"
+      - name: Prove test-first session member gate failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-before"
+          git worktree add --detach "$before_dir" 6076094b7b1a5458904b73c6ccd56f5bda417776
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/member-gate-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q -- '--- FAIL: TestSessionMemberGateServesTheClaudeMember' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateServesTheCodexMemberOnly' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesRequestsWithoutAResolvableMember' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q 'a plain client key: status = 200, want 403 from the session member gate' "$RUNNER_TEMP/member-gate-before.log"
+          grep -q -- '--- PASS: TestSessionMemberGateOffKeepsClientKeys' "$RUNNER_TEMP/member-gate-before.log"
+      - name: Prove test-first validator finding failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-findings-before"
+          git worktree add --detach "$before_dir" df1698194d35801beccbb17435a67b68f1a74caf
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/member-gate-findings-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          log="$RUNNER_TEMP/member-gate-findings-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesAmbiguousModelFields ' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesAmbiguousModelFieldsOnTheWebsocket' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesAliasesToAnotherModel' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesOnceTheIdentityIsGone' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateReverifiesEachWebsocketFrame' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateRefusesEveryUnresolvedIdentityWith403' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateSendsNoImageToolUpstream' "$log"
+          grep -q 'duplicate key: status = 200, want 403 from the session member gate' "$log"
+          grep -q 'codex alias gpt-6-astra -> gpt-5.5-codex: status = 200, want 403' "$log"
+          grep -q 'after deleted: status = 200, want 403' "$log"
+          grep -q 'unknown-key: status = 401, want 403' "$log"
+          grep -q 'the gateway added an image_generation tool' "$log"
+          grep -q -- '--- PASS: TestSessionMemberGateOffKeepsClientKeys' "$log"
+      - name: Prove test-first round-2 finding failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-round2-before"
+          git worktree add --detach "$before_dir" 3526f7ffb6e7de70635c7382de40ef9ad57b2732
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api -run 'SessionMemberGateR2' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/member-gate-round2-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          log="$RUNNER_TEMP/member-gate-round2-before.log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2DuplexFramesStillApplyTheGate' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2NestedDuplicateToolType' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2WebsocketNestedDuplicateToolType' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2StrippingLeavesUsableToolChoice' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2StrictRootVariants' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2LegacyCompletionsStreamStrict' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2ChatCompletionsResponsesFormatStrict' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2RefusesRepeatedKeysAtAnyDepth' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR2StrippingKeepsTheOtherAllowedTools' "$log"
+          grep -q 'duplex continuation skipped the member gate' "$log"
+          grep -q 'duplicate nested type defeats final image stripping' "$log"
+          grep -q 'stripped image request retains an unsatisfiable tool choice' "$log"
+          grep -q 'streaming legacy completions skipped the strict root decoder' "$log"
+          grep -q -- '--- PASS: TestSessionMemberGateR2NeutralNestedFieldsKeepMember' "$log"
+          grep -q -- '--- PASS: TestSessionMemberGateR2WebsocketAppendAndOtherFrames' "$log"
+      - name: Prove test-first round-3 finding failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/member-gate-round3-before"
+          git worktree add --detach "$before_dir" 33f47341f253a2d037282b79a1db6b826d34856c
+          cd "$before_dir"
+          log="$RUNNER_TEMP/member-gate-round3-before.log"
+          set +e
+          go test -p 2 ./internal/api ./sdk/api/handlers ./internal/runtime/executor/helps -run 'R3|RequestBodyBound|ImageToolChoice' -count=1 -v 2>&1 | tee "$log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          grep -q -- '--- FAIL: TestR3DecoderTotalOutputBound' "$log"
+          grep -q -- '--- FAIL: TestRequestBodyBoundAppliesToEveryDecodingStage' "$log"
+          grep -q -- '--- FAIL: TestRequestBodyBoundAppliesToTheEncodedBody' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR3DecompressedBodyBound' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR3PlainBodyBound' "$log"
+          grep -q -- '--- FAIL: TestRequestBodyBoundAppliesWithTheGateOff' "$log"
+          grep -q -- '--- FAIL: TestSessionMemberGateR3RequestBodyBoundIsConfigurable' "$log"
+          grep -q -- '--- FAIL: TestR3GateOffImagePayloadSnapshot' "$log"
+          grep -q '64 MiB expanded into memory with no total-output limit' "$log"
+          grep -q '64 MiB decoded: status = 200 with 1 executions, want 413 with 0' "$log"
+          grep -q 'the gate is off, so it must stay as the base leaves it' "$log"
+          grep -q -- '--- PASS: TestImageToolChoiceCleanupRunsWithTheGateOn' "$log"
       - name: Prove test-first Codex device-login failures
         shell: bash
         run: |
@@ -245,7 +341,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          unformatted="$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go internal/auth/claude internal/api internal/tui sdk/auth internal/auth/codex internal/cmd internal/logging internal/store)"
+          unformatted="$(gofmt -l sdk/api/handlers/openai/openai_responses_websocket_cache_retention_test.go sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go internal/auth/claude internal/api internal/tui sdk/auth internal/auth/codex internal/cmd internal/logging internal/store internal/access internal/api/server_session_member_gate.go internal/api/server_session_member_gate_test.go internal/api/server_routes.go internal/config/session_member_gate.go internal/config/session_member_gate_test.go internal/config/sdk_config.go sdk/access sdk/api/handlers/session_member_gate.go sdk/api/handlers/session_member_gate_test.go internal/api/server_session_member_gate_findings_test.go internal/api/server_middleware.go sdk/cliproxy/auth/session_member_gate.go sdk/cliproxy/auth/conductor_execution.go internal/runtime/executor/helps/payload_helpers.go internal/api/server_session_member_gate_round2_test.go sdk/api/handlers/openai/openai_responses_websocket.go sdk/api/handlers/openai/openai_responses_websocket_input.go internal/api/server_session_member_gate_round3_test.go sdk/api/handlers/request_body.go sdk/api/handlers/request_body_bound_test.go internal/runtime/executor/helps/payload_image_tool_choice_test.go)"
           if [ -n "$unformatted" ]; then
             echo "::error::not gofmt-formatted:"
             echo "$unformatted"
@@ -264,6 +360,11 @@ jobs:
           go test -p 2 ./internal/auth/claude ./internal/api/handlers/management -run 'KeepsLocalhostRedirect|Anthropic' -count=1 -v
           go test -p 2 ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
           go test -p 2 -race ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
+      - name: Verify the session member gate
+        run: |
+          go test -p 2 ./internal/api -run 'SessionMemberGate' -count=1 -v
+          go test -p 2 ./internal/access/... ./internal/config ./sdk/access ./sdk/api/handlers/... ./internal/api ./sdk/cliproxy/... ./internal/runtime/executor/... -count=1
+          go test -p 2 -race ./internal/access/... ./sdk/access ./sdk/api/handlers ./internal/api ./sdk/cliproxy/auth ./internal/runtime/executor/helps -count=1
       - name: Verify the Codex device login and the removed browser login
         run: |
           go test -p 2 ./internal/api/handlers/management ./internal/api ./internal/tui -run 'TestA249|TestA232|TestA234|TestValidatorPR9|CodexDeviceLogin|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|CodexLocalhostCallback|ManagementV8IndependentContract|OAuthCallbackRejectsCompletedSession|CodexOAuthStartsTheDeviceLogin|GetOAuthCallback' -count=1 -v

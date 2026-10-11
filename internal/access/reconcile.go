@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
+	sessionmember "github.com/router-for-me/CLIProxyAPI/v8/internal/access/session_member"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	log "github.com/sirupsen/logrus"
@@ -85,6 +86,7 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 	}
 
 	existing := manager.Providers()
+	sessionmember.Register(&newCfg.SDKConfig)
 	configaccess.Register(&newCfg.SDKConfig)
 	providers, added, updated, removed, err := ReconcileProviders(oldCfg, newCfg, existing)
 	if err != nil {

@@ -75,6 +75,124 @@ the redirect URI. Pull request CI proves the tests fail at the test-first commit
 `04bc849836b5b2557630126e7204599abeb57c12`, then runs them, the Claude auth,
 management handler and SDK auth packages, and the race checks.
 
+## Session member gate
+
+Fork-only, for the v2 gateways: infra-v2 D-000400 item 1 (infra-v2 #1048,
+2026-10-11), a session runs one model for its whole life and the v2 gateway
+refuses inference for any model other than the session's member. Off unless
+the config sets it:
+
+```yaml
+access:
+  session-member-gate:
+    enabled: true
+    audience: cliproxy            # the session token's audience
+    namespace: agent-sessions-v2  # the session pods' ServiceAccount
+    service-account: agent-session
+    # member-annotation: cvu.cleverunicorn.io/member (default)
+    # api-server, token-file, ca-file: the in-cluster defaults
+```
+
+A session pod presents its projected ServiceAccount token as its client key
+(`Authorization: Bearer` or `x-api-key`). The `session-member` access provider
+verifies it with a TokenReview for the audience, requires the session
+ServiceAccount, reads the pod the token is bound to (its uid must match) and
+takes the member, `<harness>/<model>`, from the pod's annotation. The
+dashboard alone writes that annotation and admission keeps it unchanged after
+create, and a harness can present only its own pod's token, so it can claim no
+other member. The gateway's ServiceAccount needs `create` on `tokenreviews` and
+`get` on pods in the session namespace.
+
+Nothing is cached. Every request is reviewed and its pod read again, and on a
+websocket, which authenticates once at the upgrade, every frame that can start
+or continue a response is resolved again: in the handler's loop, and, with
+Codex response steering on (where the executor reads follow-up frames itself
+and writes them upstream), in the frame reader before either the executor or
+the handler sees the frame, so a refused frame is answered with the 403 error
+event and never forwarded. A token the API server stops accepting, or a
+deleted or replaced pod, is refused at the gateway's next request or frame; a
+response already streaming when that happens runs to its end. The cost is one
+TokenReview and one pod read per request (up to two of each per websocket
+frame).
+
+With the gate on, every refusal is a 403 made before any credential or
+upstream is used:
+
+- any authentication failure on the client API routes, whatever the key;
+- in the three execution functions of `sdk/api/handlers` (non-stream, token
+  count, stream), through which every chat, messages and responses route
+  runs: a request without a session member, or whose model is not the
+  member's model (case and a thinking suffix are ignored). The Responses
+  websocket checks each frame before execution and answers an error event;
+- a body the gateway and a provider could read differently. The client's own
+  body is checked on every route before any conversion (the route gate reads
+  it once, decoded from its `Content-Encoding`, and hands exactly that body to
+  the handler; legacy completions and a Responses-format chat body are
+  converted only afterwards), and each websocket frame likewise. It must be
+  one JSON object in which no object at any depth repeats a key (after
+  unescaping), so every reader of it (the gate, the image stripper,
+  translators, the provider) reads the same value of every field and what is
+  forwarded means exactly what was checked; at its top level it names the
+  model at most once in any letter case, as a string naming the member's
+  model;
+- a tool that runs another model: any tool in `tools` or `tool_choice` that
+  names a model of its own, Anthropic's advisor tool (`advisor_*`), and a
+  stored Responses `prompt` template. The Responses `image_generation` tool,
+  which runs an image model, is stripped instead, because the Codex CLI sends
+  it by default: with the gate on the effective `disable-image-generation`
+  mode is `true`, so the payload finalizer removes it from `tools` and
+  `tool_choice`, and (only with the gate on; with it off the stripping stays
+  exactly upstream's) from an `allowed_tools` choice, which is dropped when it
+  allows nothing else, and drops a `"required"` or `{"type":"any"}` choice that
+  no remaining tool can satisfy. The Codex executor never adds it. The other
+  built-in tools of the Responses and Messages APIs run on the request's
+  model;
+- in the auth manager, before any credential is picked: a member's model that
+  an OAuth or API-key alias, a model pool or routing would run upstream as
+  another model on any credential of the request's providers;
+- client API routes that reach upstream credentials outside those functions
+  (realtime, live, alpha search, images, videos, Gemini generation). The
+  model lists stay open, so a valid plain client key still serves the
+  readiness probe.
+
+Pull request CI proves the gate tests fail at the test-first commit
+`6076094b7b1a5458904b73c6ccd56f5bda417776` (session tokens refused, a plain key
+served), and the tests of the validator's findings (a216/W-5) fail at
+`df1698194d35801beccbb17435a67b68f1a74caf` (duplicate model fields served, an
+alias served, a stale identity served, 401 or 500 instead of 403, an injected
+image tool), and the round-2 tests (a234/W-1) fail at
+`3526f7ffb6e7de70635c7382de40ef9ad57b2732` (duplex frames skip the gate with
+steering on, a nested duplicate tool type forwards the image tool, a stripped
+image tool leaves an unsatisfiable `tool_choice`, converted routes skip the
+strict check), and the round-3 tests fail at
+`33f47341f253a2d037282b79a1db6b826d34856c` (an unbounded decompressed body, a
+gate-off payload change), while the gate-off control passes; then it runs
+them, the affected packages and race checks.
+
+## Request body bound
+
+Fork-only, with the session member gate on or off (the operator's decision of
+2026-10-11). A client request body is bounded as received and after each
+`Content-Encoding` decoding stage, while it streams, so a small compressed body
+cannot expand into memory. The bound is `requests.max-body-mb`, default 64 MiB:
+above the providers' own maxima (Anthropic's Messages API refuses requests over
+32 MB; OpenAI accepts at most 50 MB of image input per request), with room for
+JSON framing. A negative value removes it.
+
+Past the bound a request is refused before any execution:
+
+- with the gate on, by the session member gate, with 413, on every inference
+  route it admits;
+- with the gate off, by the OpenAI chat, completions, responses and images
+  handlers with 413, and by the video handlers with 400 (they report every body
+  read error as 400).
+
+**Difference from upstream with the gate off:** upstream reads such a body, and
+its decoded form, whole and executes it; this fork answers 413 (400 on the
+video routes) instead. Only bodies over the bound are affected, which the
+providers refuse anyway. A body that is not decoded, on the Claude and Gemini
+routes, is still read as upstream reads it, without a bound.
+
 ## Codex logins through the management API
 
 Fork-only, under infra-v2 I-000026 (every provider login runs from the

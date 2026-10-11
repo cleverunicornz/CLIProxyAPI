@@ -149,14 +149,16 @@ func corsMiddleware() gin.HandlerFunc {
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, false)
+	return accessAuthMiddleware(manager, false, nil)
 }
 
 func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, true)
+	return accessAuthMiddleware(manager, true, nil)
 }
 
-func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.HandlerFunc {
+// accessAuthMiddleware authenticates with the configured providers. While memberGate reports the session member
+// gate on, every authentication failure is the gate's refusal: 403, before any upstream (fork-only).
+func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, memberGate func() bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
 			c.Next()
@@ -179,6 +181,10 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 		statusCode := err.HTTPStatusCode()
 		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)
+		}
+		if memberGate != nil && memberGate() {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "session member gate: the request's credential does not resolve to a session member (" + err.Message + ")"})
+			return
 		}
 		if realtimeError {
 			errorType := "authentication_error"
