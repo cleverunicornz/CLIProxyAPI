@@ -75,6 +75,31 @@ the redirect URI. Pull request CI proves the tests fail at the test-first commit
 `04bc849836b5b2557630126e7204599abeb57c12`, then runs them, the Claude auth,
 management handler and SDK auth packages, and the race checks.
 
+## Codex logins through the management API
+
+Fork-only, under infra-v2 I-000026 (every provider login runs from the
+platform's interface by the provider's code flow, never a pasted localhost
+redirect address, a pod shell or a port-forward) and G-000480, which records
+the v2 dashboard's Codex paste-back login as violating it. The device code
+is the only Codex login the management API offers:
+`POST /v0/management/codex-device-login` starts it and
+`GET /v0/management/codex-device-login?state=` reports it. The gateway polls
+OpenAI and stores the auth the CLI device login builds; OpenAI's
+`device_auth_id`, the authorization code, the PKCE values and the tokens are
+never returned. The browser login with the `localhost:1455` redirect is
+removed: `codex-auth-url`, the v8 `oauth/auth-url?provider=codex`,
+`oauth-callback` for Codex and `/codex/callback` answer `410 Gone` with
+`codex_browser_login_removed` and start nothing. The TUI's Codex login uses
+the device login. The CLI logins (`-codex-login`, `-codex-device-login`) are
+unchanged. The contract is
+[docs/codex-device-login-management.md](docs/codex-device-login-management.md).
+
+Pull request CI proves the tests fail at the test-first commits
+`f710e456872ca89be1ff9521b5e97b6e9891f445` (device login),
+`cdb4fa498c45c09bfc4af5bc273a4b1c2e61f458` (browser login removed) and
+`72f9a86cfc2785bb1bce928f2373b54862b5534f` (TUI), then runs them and the
+race checks. OpenAI is played by an in-process fake; no request leaves CI.
+
 ## Releases
 
 The fork publishes its own GitHub releases from `internal/main` through
