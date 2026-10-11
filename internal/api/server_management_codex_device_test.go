@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -54,5 +55,27 @@ func TestCodexDeviceLoginRoutesRequireManagementKey(t *testing.T) {
 		if tc.want == http.StatusNotFound && rec.Body.Len() == 0 {
 			t.Fatalf("%s %s answered an empty 404: the route is not registered", tc.method, tc.target)
 		}
+	}
+}
+
+// I-000026: the localhost:1455 callback of the removed Codex browser login
+// answers 410 and writes nothing, even for a pending Codex session.
+func TestCodexLocalhostCallbackIsRemoved(t *testing.T) {
+	s := newTestServer(t)
+	state := "codex-callback-removed-state"
+	management.RegisterOAuthSession(state, "codex")
+	t.Cleanup(func() { management.CancelOAuthSession(state) })
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?code=c&state="+state, nil)
+	rec := httptest.NewRecorder()
+	s.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusGone || !strings.Contains(rec.Body.String(), `"error":"codex_browser_login_removed"`) {
+		t.Fatalf("GET /codex/callback = %d %s, want 410 codex_browser_login_removed", rec.Code, rec.Body.String())
+	}
+	if _, errStat := os.Stat(filepath.Join(s.cfg.AuthDir, ".oauth-codex-"+state+".oauth")); !os.IsNotExist(errStat) {
+		t.Fatalf("the removed callback wrote a callback file: %v", errStat)
+	}
+	if !management.IsOAuthSessionPending(state, "codex") {
+		t.Fatal("the removed callback ended the session")
 	}
 }

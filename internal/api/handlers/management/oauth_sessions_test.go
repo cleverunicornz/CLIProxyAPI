@@ -115,7 +115,7 @@ func TestGetAuthStatusRejectsUnknownStateAndAcceptsCompletedState(t *testing.T) 
 func TestOAuthCallbackRejectsCompletedSession(t *testing.T) {
 	store := newOAuthSessionStore(time.Minute)
 	replaceOAuthSessionStoreForTest(t, store)
-	store.Register("completed-state", "codex")
+	store.Register("completed-state", "anthropic")
 	store.Complete("completed-state")
 
 	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
@@ -125,7 +125,7 @@ func TestOAuthCallbackRejectsCompletedSession(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/oauth-callback",
-		strings.NewReader(`{"provider":"codex","state":"completed-state","code":"test-code"}`),
+		strings.NewReader(`{"provider":"anthropic","state":"completed-state","code":"test-code"}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
