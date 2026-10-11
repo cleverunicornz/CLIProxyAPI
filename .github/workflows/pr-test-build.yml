@@ -148,6 +148,32 @@ jobs:
           grep -q 'at published expiry status=pending code-visible=true cancel-accepted=true' "$RUNNER_TEMP/codex-a234-before.log"
           grep -q 'second final=done files-after=0' "$RUNNER_TEMP/codex-a234-before.log"
           grep -q 'explicit-provider-query=true HTTP=410 callback-written=false' "$RUNNER_TEMP/codex-a234-before.log"
+      - name: Prove test-first failures of validator a232's findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          before_dir="$RUNNER_TEMP/codex-a232-before"
+          git worktree add --detach "$before_dir" 9eb8f940ceb917f9e7e08bcdbf179df782aec39d
+          cd "$before_dir"
+          set +e
+          go test -p 2 ./internal/api/handlers/management -run '^(TestA232|TestA234CancelCannotDeleteAnotherCompletedLogin)' -count=1 -v 2>&1 | tee "$RUNNER_TEMP/codex-a232-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          test "$before_status" = 1
+          for name in TestA232ThreeLoginCancelMatrix TestA232CancelAtEachSaveBoundary TestA232StagedLoginIsNotLiveBeforeCommit TestA232FailedFinalPersistenceIsNotDone TestA232CrashAfterAcceptedCancelBeforeRecord TestA232PluginRedirectStateExemption TestA232ExpiryRaceLeavesLegacyWaiting; do
+            grep -q -- "--- FAIL: $name " "$RUNNER_TEMP/codex-a232-before.log"
+          done
+          for name in TestA232ConcurrentWriterSurvivesACancelledLogin TestA234CancelCannotDeleteAnotherCompletedLogin; do
+            grep -q -- "--- PASS: $name " "$RUNNER_TEMP/codex-a232-before.log"
+          done
+          test "$(grep -c 'ownership mismatch' "$RUNNER_TEMP/codex-a232-before.log")" = 20
+          grep -q 'statuses=\[cancelled cancelled cancelled\] file-count=1 stored-cancelled=true' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'phase=commit status-at-cancel=pending accepted=true' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'stored while staged=1' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'final status=done error=<nil> stored="" count=0' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'persisted-cancelled-auths=1' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'query-provider=true HTTP=410 callback-written=false' "$RUNNER_TEMP/codex-a232-before.log"
+          grep -q 'device-status=expired legacy-status=wait' "$RUNNER_TEMP/codex-a232-before.log"
       - name: Check formatting
         shell: bash
         run: |
@@ -167,11 +193,11 @@ jobs:
           go test -p 2 -race ./internal/auth/claude ./internal/api/handlers/management ./sdk/auth -count=1
       - name: Verify the Codex device login and the removed browser login
         run: |
-          go test -p 2 ./internal/api/handlers/management ./internal/api ./internal/tui -run 'TestA234|TestValidatorPR9|CodexDeviceLogin|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|CodexLocalhostCallback|ManagementV8IndependentContract|OAuthCallbackRejectsCompletedSession|CodexOAuthStartsTheDeviceLogin|GetOAuthCallback' -count=1 -v
+          go test -p 2 ./internal/api/handlers/management ./internal/api ./internal/tui -run 'TestA232|TestA234|TestValidatorPR9|CodexDeviceLogin|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|CodexLocalhostCallback|ManagementV8IndependentContract|OAuthCallbackRejectsCompletedSession|CodexOAuthStartsTheDeviceLogin|GetOAuthCallback' -count=1 -v
           go test -p 2 ./internal/api/... ./internal/logging ./internal/tui ./internal/auth/codex ./internal/cmd ./sdk/auth ./sdk/api/... -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api ./internal/logging ./internal/tui ./internal/auth/codex ./sdk/auth -count=1
           go test -p 2 -race ./internal/api/handlers/management ./internal/api -run '^TestValidatorPR9' -count=3
-          go test -p 2 -race ./internal/api/handlers/management -run '^TestA234' -count=3
+          go test -p 2 -race ./internal/api/handlers/management -run '^(TestA234|TestA232)' -count=3
           go test -p 2 -race ./internal/api/handlers/management -run 'CodexDeviceLogin(Start|Unreachable|PollAnd|CancelDuring|CancelAfter|CancelPast|LateCancelled|PollAnswers|ExpiredToken|Expires|DeniedFails|CancelStops|Concurrent|SuccessStores|Requires|StatusErrors|Finished)|CodexBrowserLogin|OAuthCallbackRefusesCodex|OAuthCallbackPluginOpenAI|TestValidatorPR9(StartError|CancelBefore|Inflight|RemovedCallback)|TestA234(Published|CancelOutcome|ConcurrentCancel|Plugin|CancelCannot)' -count=10
       - name: Build portable server
         run: |

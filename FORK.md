@@ -97,17 +97,20 @@ unchanged. The contract is
 Each login is one state machine with compare-and-set transitions, so a cancel
 and a completion never both succeed, nothing is stored past the expiry or
 after an accepted cancel, and polling follows RFC 8628 (`slow_down` raises the
-interval by 5 s). A cancelled login undoes only its own credential write, so
-cancelling one login never removes another login's committed credential, and
-`expires_at` is published to the nanosecond it is enforced. Failures carry at most an HTTP status, never a provider
+interval by 5 s). A login's credential stays in memory until its commit, which
+stores it, registers it and only then reports `done`; a cancel wins only before
+the commit, so a cancelled login's credential is never stored, nothing is ever
+undone, and a crash before the commit leaves nothing. `expires_at` is
+published to the nanosecond it is enforced. Failures carry at most an HTTP status, never a provider
 response body, and the removed routes leave no query string in the access log.
 
 Pull request CI proves the tests fail at the test-first commits
 `f710e456872ca89be1ff9521b5e97b6e9891f445` (device login),
 `cdb4fa498c45c09bfc4af5bc273a4b1c2e61f458` (browser login removed),
 `72f9a86cfc2785bb1bce928f2373b54862b5534f` (TUI) and
-`e6a71996eab2e49d45992b1927963b355da197e9` (validator a216's findings) and
-`89df64c9e9f202430ad969dc10fac7e2978b658d` (validator a234's findings), then
+`e6a71996eab2e49d45992b1927963b355da197e9` (validator a216's findings),
+`89df64c9e9f202430ad969dc10fac7e2978b658d` (validator a234's findings) and
+`9eb8f940ceb917f9e7e08bcdbf179df782aec39d` (validator a232's findings), then
 runs them and the race checks. OpenAI is played by an in-process fake; no
 request leaves CI.
 
