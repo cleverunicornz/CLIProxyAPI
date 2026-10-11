@@ -94,11 +94,19 @@ the device login. The CLI logins (`-codex-login`, `-codex-device-login`) are
 unchanged. The contract is
 [docs/codex-device-login-management.md](docs/codex-device-login-management.md).
 
+Each login is one state machine with compare-and-set transitions, so a cancel
+and a completion never both succeed, nothing is stored past the expiry or
+after an accepted cancel, and polling follows RFC 8628 (`slow_down` raises the
+interval by 5 s). Failures carry at most an HTTP status, never a provider
+response body, and the removed routes leave no query string in the access log.
+
 Pull request CI proves the tests fail at the test-first commits
 `f710e456872ca89be1ff9521b5e97b6e9891f445` (device login),
-`cdb4fa498c45c09bfc4af5bc273a4b1c2e61f458` (browser login removed) and
-`72f9a86cfc2785bb1bce928f2373b54862b5534f` (TUI), then runs them and the
-race checks. OpenAI is played by an in-process fake; no request leaves CI.
+`cdb4fa498c45c09bfc4af5bc273a4b1c2e61f458` (browser login removed),
+`72f9a86cfc2785bb1bce928f2373b54862b5534f` (TUI) and
+`e6a71996eab2e49d45992b1927963b355da197e9` (validator a216's findings), then
+runs them and the race checks. OpenAI is played by an in-process fake; no
+request leaves CI.
 
 ## Releases
 

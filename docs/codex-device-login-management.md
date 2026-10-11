@@ -70,7 +70,7 @@ Errors:
 
 | Status | Body | When |
 |---|---|---|
-| `502` | `{"status": "error", "error": "device_code_request_failed", "message": "<reason>"}` | OpenAI refused or did not answer the device-code request, or answered without a user code. `message` is human-readable and contains no secret. |
+| `502` | `{"status": "error", "error": "device_code_request_failed", "message": "<reason>"}` | OpenAI refused or did not answer the device-code request, or answered without a user code. `message` names at most OpenAI's HTTP status, for example `OpenAI refused the device-code request (HTTP 500)`; it never carries OpenAI's response body or transport detail. |
 | `500` | `{"status": "error", "error": "internal_error"}` | The gateway could not create the login (for example, random state generation failed). |
 
 Several logins may run at the same time. Each gets its own `state` and user
@@ -120,7 +120,7 @@ Failed:
   "status": "failed",
   "expires_at": "2026-10-11T12:15:00Z",
   "error": "provider_rejected",
-  "message": "OpenAI ended the device login (status 400)"
+  "message": "OpenAI ended the device login with status 400"
 }
 ```
 
@@ -154,14 +154,14 @@ appears only on `done`. `error` and `message` appear only on `failed` and
 
 | `error` | When |
 |---|---|
-| `provider_rejected` | OpenAI's device-token poll answered with a status other than success or pending (`403`/`404`). OpenAI has no distinct "denied" answer; a denial arrives this way, or as no answer until expiry. |
+| `provider_rejected` | OpenAI's device-token poll ended the login: `access_denied`, or any other error than those the gateway keeps polling on. The gateway polls as RFC 8628 section 3.5 asks: `authorization_pending` (and OpenAI's pending `403`/`404`) continue; `slow_down` continues with the polling interval raised by 5 seconds; `expired_token` makes the login `expired`. A denial arrives as `access_denied` or another error, or as no answer until expiry. |
 | `provider_unreachable` | The poll request to OpenAI failed at the network level. |
 | `invalid_provider_response` | OpenAI answered success without the authorization code fields. |
 | `exchange_failed` | Exchanging the authorization code for tokens failed. |
 | `missing_account` | The tokens carry no account e-mail, so the auth cannot be named or stored. |
 | `save_failed` | Storing the auth failed. |
 
-`message` is human-readable and never contains a code or token.
+`message` is human-readable, names at most an HTTP status, and never contains a code, a token or a provider response body.
 
 Errors:
 
@@ -174,7 +174,12 @@ Errors:
 ### Retention
 
 A pending login stays pending until it finishes, is cancelled, or reaches
-`expires_at`, when it becomes `expired`. A finished login (`done`,
+`expires_at`, when it becomes `expired`. Expiry is exact: a request to OpenAI
+still in flight at `expires_at` is abandoned, a confirmation arriving after it
+is ignored and nothing is stored, and from `expires_at` on the status reads
+`expired` without the user code. A login whose confirmation arrived before
+`expires_at` and whose auth is being stored still reads `pending` until it is
+`done`. A finished login (`done`,
 `failed`, `expired`, `cancelled`) is reported for 15 minutes after it
 finished, then answers `404 unknown_state`. Nothing survives a gateway
 restart; a client polling across a restart gets `404 unknown_state` and
@@ -188,11 +193,14 @@ operator's confirmation by that much plus the token exchange.
 
 The existing route, unchanged:
 
-- a pending login: `200 {"status": "ok", "cancelled": true}`; the gateway
-  stops polling OpenAI and stores nothing, even if OpenAI confirms later.
-  Status then reports `cancelled`.
+- a pending login, including one whose auth is being stored:
+  `200 {"status": "ok", "cancelled": true}`. The gateway stops polling
+  OpenAI and keeps nothing, even if OpenAI confirms later or a save was
+  already under way (what it stored is removed again). Status then reports
+  `cancelled` and never changes.
 - a finished or unknown login: `200 {"status": "ok", "cancelled": false}`;
-  its status is unchanged.
+  its status is unchanged. A login that reached `done` stays `done`: a cancel
+  and a completion never both succeed.
 - `400 {"status": "error", "error": "missing state"}` or
   `400 {"status": "error", "error": "invalid state"}`.
 
@@ -230,8 +238,9 @@ gateway's token store like every other management login, so it appears in
 
 Under I-000026 the gateway no longer serves the Codex browser login with the
 `localhost:1455` redirect, through the management API or its callbacks. These
-requests answer `410 Gone`, start no session, start no callback forwarder, and
-write nothing:
+requests answer `410 Gone` before any other validation of the request,
+start no session, start no callback forwarder, write nothing, and leave no
+query string in the gateway's access log:
 
 - `GET /v0/management/codex-auth-url`, with or without `is_webui`;
 - `GET /v8/management/oauth/auth-url?provider=codex`;
