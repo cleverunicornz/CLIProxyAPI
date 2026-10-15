@@ -120,16 +120,18 @@ func TestRemoteStoresSaveDoesNotShortCircuitWhenLocalFileMatches(t *testing.T) {
 				Metadata: map[string]any{"type": "antigravity"},
 			}
 
-			// First Save writes the local file, then fails on the remote backend.
+			// First Save fails on the remote backend. The credential is staged
+			// first and the local mirror moves only once the remote write
+			// succeeded (fork-only, a249 R5/R6), so a refused remote write
+			// leaves no local file behind.
 			if _, errSave := store.Save(context.Background(), auth); !errors.Is(errSave, errRemoteDown) {
 				t.Fatalf("first Save() error = %v, want %v", errSave, errRemoteDown)
 			}
 			if len(remoteSaved) != 0 {
 				t.Fatalf("expected no remote records after failed Save, got %v", remoteSaved)
 			}
-			localBytes, errRead := os.ReadFile(filepath.Join(authDir, "partial.json"))
-			if errRead != nil || string(localBytes) != `{"disabled":false,"type":"antigravity"}` {
-				t.Fatalf("unexpected local mirror file after failed remote Save: %q (%v)", string(localBytes), errRead)
+			if localBytes, errRead := os.ReadFile(filepath.Join(authDir, "partial.json")); errRead == nil {
+				t.Fatalf("a refused remote Save must leave no local mirror file, got %q", string(localBytes))
 			}
 
 			// Second Save with identical metadata must still sync to the remote backend.

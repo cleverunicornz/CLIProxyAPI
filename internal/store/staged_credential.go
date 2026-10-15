@@ -41,3 +41,10 @@ func stageExistingMirror(path, staging string) error {
 	}
 	return nil
 }
+
+// removeStagedCredential removes a Save's staging file and the Codex per-file lock file a staged Codex write
+// leaves beside it, so a refused save leaves the auth directory exactly as it found it.
+func removeStagedCredential(staging string) {
+	_ = os.Remove(staging)
+	_ = os.Remove(staging + ".lock")
+}

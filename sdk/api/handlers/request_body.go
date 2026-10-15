@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -73,7 +74,7 @@ func RequestBodyReadErrorStatus(err error) int {
 // readBounded reads r to its end, stopping with a RequestBodyTooLargeError as soon as it passes limit bytes, so
 // nothing past the bound is held.
 func readBounded(r io.Reader, limit int64, stage string) ([]byte, error) {
-	if limit <= 0 {
+	if limit <= 0 || limit == math.MaxInt64 {
 		return io.ReadAll(r)
 	}
 	data, err := io.ReadAll(io.LimitReader(r, limit+1))
@@ -152,8 +153,9 @@ func decodeRequestBody(raw []byte, encoding string, limit int64) ([]byte, error)
 }
 
 func decodeZstdRequestBody(raw []byte, limit int64) ([]byte, error) {
+	unbounded := limit <= 0 || limit == math.MaxInt64
 	options := []zstd.DOption{zstd.WithDecoderConcurrency(1)}
-	if limit > 0 {
+	if !unbounded {
 		options = append(options, zstd.WithDecoderMaxMemory(uint64(limit)+1))
 	}
 	decoder, err := zstd.NewReader(bytes.NewReader(raw), options...)

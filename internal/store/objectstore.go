@@ -203,7 +203,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 			return "", fmt.Errorf("object store: %w", errStage)
 		}
 		if _, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, tmp, auth); errCodex != nil {
-			_ = os.Remove(tmp)
+			removeStagedCredential(tmp)
 			return "", errCodex
 		}
 	} else {
@@ -217,7 +217,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 				setter.SetMetadata(auth.Metadata)
 			}
 			if err = auth.Storage.SaveTokenToFile(tmp); err != nil {
-				_ = os.Remove(tmp)
+				removeStagedCredential(tmp)
 				return "", err
 			}
 		case auth.Metadata != nil:
@@ -253,19 +253,19 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 
 	data, err := readStagedCredential(tmp)
 	if err != nil {
-		_ = os.Remove(tmp)
+		removeStagedCredential(tmp)
 		return "", fmt.Errorf("object store: %w", err)
 	}
 	// A PUT of the credential only: unlike uploadAuth, a save never deletes
 	// the remote object.
 	if err = s.putAuthObject(ctx, path, data); err != nil {
-		_ = os.Remove(tmp)
+		removeStagedCredential(tmp)
 		return "", err
 	}
 	if errRename := os.Rename(tmp, path); errRename != nil {
 		// The store of record holds the credential; only the local mirror is
 		// stale until the next load reconciles it.
-		_ = os.Remove(tmp)
+		removeStagedCredential(tmp)
 		return path, fmt.Errorf("%w: object store: rename auth file: %w", cliproxyauth.ErrMirrorNotUpdated, errRename)
 	}
 	return path, nil

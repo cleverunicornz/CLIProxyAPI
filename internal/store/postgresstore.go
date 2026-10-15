@@ -254,7 +254,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 			return "", fmt.Errorf("postgres store: %w", errStage)
 		}
 		if _, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, tmp, auth); errCodex != nil {
-			_ = os.Remove(tmp)
+			removeStagedCredential(tmp)
 			return "", errCodex
 		}
 	} else {
@@ -268,7 +268,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 				setter.SetMetadata(auth.Metadata)
 			}
 			if err = auth.Storage.SaveTokenToFile(tmp); err != nil {
-				_ = os.Remove(tmp)
+				removeStagedCredential(tmp)
 				return "", err
 			}
 		case auth.Metadata != nil:
@@ -304,24 +304,24 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 
 	relID, err := s.relativeAuthID(path)
 	if err != nil {
-		_ = os.Remove(tmp)
+		removeStagedCredential(tmp)
 		return "", err
 	}
 	data, err := readStagedCredential(tmp)
 	if err != nil {
-		_ = os.Remove(tmp)
+		removeStagedCredential(tmp)
 		return "", fmt.Errorf("postgres store: %w", err)
 	}
 	// An insert or update of the credential row only: unlike upsertAuthRecord,
 	// a save never deletes the row.
 	if err = s.persistAuth(ctx, relID, data); err != nil {
-		_ = os.Remove(tmp)
+		removeStagedCredential(tmp)
 		return "", err
 	}
 	if errRename := os.Rename(tmp, path); errRename != nil {
 		// The store of record holds the credential; only the local mirror is
 		// stale until the next load reconciles it.
-		_ = os.Remove(tmp)
+		removeStagedCredential(tmp)
 		return path, fmt.Errorf("%w: postgres store: rename auth file: %w", cliproxyauth.ErrMirrorNotUpdated, errRename)
 	}
 	return path, nil
