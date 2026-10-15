@@ -15,17 +15,24 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
+// MaxRequestBodyBytesContextKey stores the configured request body size limit (in bytes) on the Gin context.
+const MaxRequestBodyBytesContextKey = "maxRequestBodyBytes"
+
 // maxRequestBodyBytes bounds a request body as received and after each decoding stage; 0 means unbounded. It is
-// the configured value (config.SDKConfig.MaxRequestBodyBytes), set whenever the handlers' configuration is.
+// the configured value (config.SDKConfig.EffectiveMaxRequestBodyBytes), set whenever the handlers' configuration
+// is. The server's maxRequestBodyBytesMiddleware sets the same bound on the request's context and wraps the body,
+// so a Content-Length over it is refused before anything is read.
 var maxRequestBodyBytes atomic.Int64
 
 func init() {
 	maxRequestBodyBytes.Store(int64(config.DefaultMaxRequestBodyMB) << 20)
 }
 
-// SetMaxRequestBodyBytes sets the request body bound from cfg (fork-only).
+// SetMaxRequestBodyBytes sets the request body bound from cfg. It is the fork's bound (requests.max-body-mb,
+// default 64 MiB) when that key is set, otherwise upstream's (server.max-request-body-bytes), otherwise the
+// fork's default.
 func SetMaxRequestBodyBytes(cfg *config.SDKConfig) {
-	maxRequestBodyBytes.Store(cfg.MaxRequestBodyBytes())
+	maxRequestBodyBytes.Store(cfg.EffectiveMaxRequestBodyBytes())
 }
 
 // RequestBodyTooLargeError reports a request body over the bound, as received or after a decoding stage.
@@ -38,10 +45,21 @@ func (e *RequestBodyTooLargeError) Error() string {
 	return fmt.Sprintf("request body exceeds the %d-byte limit (%s)", e.Limit, e.Stage)
 }
 
-// IsRequestBodyTooLarge reports whether err is a RequestBodyTooLargeError.
+// StatusCode makes the error carry upstream's 413 status, so clienterror.HTTPStatusFromErrorOr and the fork's
+// RequestBodyReadErrorStatus answer the same status for a body over the bound.
+func (e *RequestBodyTooLargeError) StatusCode() int {
+	return http.StatusRequestEntityTooLarge
+}
+
+// IsRequestBodyTooLarge reports whether err is a body over the bound, as the fork's RequestBodyTooLargeError or
+// as the http.MaxBytesError the server's bounding middleware wraps the body with.
 func IsRequestBodyTooLarge(err error) bool {
 	var tooLarge *RequestBodyTooLargeError
-	return errors.As(err, &tooLarge)
+	if errors.As(err, &tooLarge) {
+		return true
+	}
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
 }
 
 // RequestBodyReadErrorStatus is the HTTP status for a ReadRequestBody error: 413 for a body over the bound, else 400.
@@ -68,13 +86,23 @@ func readBounded(r io.Reader, limit int64, stage string) ([]byte, error) {
 	return data, nil
 }
 
+// requestBodyLimit is the bound that applies to this request: the server's per-request value when it set one,
+// else the handlers' configured bound.
+func requestBodyLimit(c *gin.Context) int64 {
+	if c != nil {
+		if limit := c.GetInt64(MaxRequestBodyBytesContextKey); limit > 0 {
+			return limit
+		}
+	}
+	return maxRequestBodyBytes.Load()
+}
+
 // ReadRequestBody reads the incoming request body and decodes supported
 // Content-Encoding values before handlers inspect JSON fields. The body as
 // received and the output of every decoding stage are bounded while they are
-// read (SetMaxRequestBodyBytes); a body over the bound is a
-// RequestBodyTooLargeError.
+// read; a body over the bound is a RequestBodyTooLargeError (413).
 func ReadRequestBody(c *gin.Context) ([]byte, error) {
-	limit := maxRequestBodyBytes.Load()
+	limit := requestBodyLimit(c)
 	var raw []byte
 	var err error
 	if c != nil && c.Request != nil && c.Request.Body != nil {

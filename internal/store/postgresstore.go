@@ -46,6 +46,7 @@ type PostgresStore struct {
 	authDir       string
 	cooldownStore *postgresCooldownStateStore
 	mu            sync.Mutex
+	persistAuthFn func(ctx context.Context, relID string, data []byte) error
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -245,37 +246,50 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	// write leaves the previous credential, local mirror included, and the
 	// auth-directory watcher never sees a credential that was not stored.
 	tmp := path + ".tmp"
-	switch {
-	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
+	if cliproxyauth.IsCodexAuthRecord(auth) {
+		// A Codex record is staged too: PersistCodexAuthFile runs against the
+		// staging file (seeded from the current mirror, so its read-before-write
+		// merge sees what is on disk) and the mirror moves only after the write.
+		if errStage := stageExistingMirror(path, tmp); errStage != nil {
+			return "", fmt.Errorf("postgres store: %w", errStage)
 		}
-		auth.Metadata["disabled"] = auth.Disabled
-		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-			setter.SetMetadata(auth.Metadata)
-		}
-		if err = auth.Storage.SaveTokenToFile(tmp); err != nil {
+		if _, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, tmp, auth); errCodex != nil {
 			_ = os.Remove(tmp)
-			return "", err
+			return "", errCodex
 		}
-	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
-		raw, errMarshal := json.Marshal(auth.Metadata)
-		if errMarshal != nil {
-			return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
-		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
-				return path, nil
+	} else {
+		switch {
+		case auth.Storage != nil:
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
 			}
-		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
-			return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
+			auth.Metadata["disabled"] = auth.Disabled
+			if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+				setter.SetMetadata(auth.Metadata)
+			}
+			if err = auth.Storage.SaveTokenToFile(tmp); err != nil {
+				_ = os.Remove(tmp)
+				return "", err
+			}
+		case auth.Metadata != nil:
+			auth.Metadata["disabled"] = auth.Disabled
+			raw, errMarshal := json.Marshal(auth.Metadata)
+			if errMarshal != nil {
+				return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
+			}
+			if existing, errRead := os.ReadFile(path); errRead == nil {
+				if jsonEqual(existing, raw) {
+					return path, nil
+				}
+			} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+				return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
+			}
+			if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
+				return "", fmt.Errorf("postgres store: write temp auth file: %w", errWrite)
+			}
+		default:
+			return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
 		}
-		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-			return "", fmt.Errorf("postgres store: write temp auth file: %w", errWrite)
-		}
-	default:
-		return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
 	}
 
 	if auth.Attributes == nil {
@@ -568,6 +582,12 @@ func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string
 }
 
 func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []byte) error {
+	if s.persistAuthFn != nil {
+		return s.persistAuthFn(ctx, relID, data)
+	}
+	if s.db == nil {
+		return fmt.Errorf("postgres store: database not configured")
+	}
 	jsonPayload := json.RawMessage(data)
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)

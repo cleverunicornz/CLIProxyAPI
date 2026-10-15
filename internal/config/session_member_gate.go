@@ -54,14 +54,25 @@ func (c *SDKConfig) EffectiveDisableImageGeneration() DisableImageGenerationMode
 // base64, and it keeps a decompression bomb from expanding past it.
 const DefaultMaxRequestBodyMB = 64
 
-// MaxRequestBodyBytes is the effective request body bound in bytes; 0 means unbounded.
-func (c *SDKConfig) MaxRequestBodyBytes() int64 {
-	mb := DefaultMaxRequestBodyMB
+// EffectiveMaxRequestBodyBytes is the effective request body bound in bytes; 0 means unbounded.
+//
+// The fork's requests.max-body-mb wins when it is set: a positive value is that many MiB, a negative value
+// removes the bound, and 0 (unset) falls through. Otherwise upstream's server.max-request-body-bytes applies
+// when it is set: a positive value is that many bytes, and a negative value removes the bound. With neither
+// key set, the fork's default DefaultMaxRequestBodyMB applies, because the gateways behind this fork must be
+// bounded by default.
+func (c *SDKConfig) EffectiveMaxRequestBodyBytes() int64 {
 	if c != nil && c.MaxRequestBodyMB != 0 {
-		mb = c.MaxRequestBodyMB
+		if c.MaxRequestBodyMB < 0 {
+			return 0
+		}
+		return int64(c.MaxRequestBodyMB) << 20
 	}
-	if mb < 0 {
+	if c != nil && c.MaxRequestBodyBytes < 0 {
 		return 0
 	}
-	return int64(mb) << 20
+	if c != nil && c.MaxRequestBodyBytes > 0 {
+		return c.MaxRequestBodyBytes
+	}
+	return int64(DefaultMaxRequestBodyMB) << 20
 }
