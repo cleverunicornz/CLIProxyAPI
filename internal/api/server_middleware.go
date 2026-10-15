@@ -39,15 +39,20 @@ const (
 	exampleAPIKeyManagementURL  = "/management.html?safe-mode=configure"
 )
 
+// maxRequestBodyBytes is the one effective request body bound the server applies, resolved exactly as the
+// handlers resolve it (config.SDKConfig.EffectiveMaxRequestBodyBytes): the fork's requests.max-body-mb wins when
+// it is set, otherwise upstream's server.max-request-body-bytes, otherwise the fork's default. The middleware
+// installs this value on the request context and wraps the body with it, so the pre-read Content-Length check and
+// the handler's bounded reads can never disagree; 0 means the bound was removed and nothing is bounded.
 func (s *Server) maxRequestBodyBytes() int64 {
 	if s == nil {
 		return 0
 	}
 	cfg := s.getConfig()
-	if cfg == nil || cfg.MaxRequestBodyBytes <= 0 {
+	if cfg == nil {
 		return 0
 	}
-	return cfg.MaxRequestBodyBytes
+	return cfg.EffectiveMaxRequestBodyBytes()
 }
 
 func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
