@@ -24,3 +24,27 @@ func readStagedCredential(path string) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// stageExistingMirror seeds the staging file staging from the mirror file path when the mirror exists, so a
+// Codex record's read-before-write merge runs against what is actually on disk. A mirror that does not exist
+// leaves the staging file absent, which is how a Codex save detects a first write.
+func stageExistingMirror(path, staging string) error {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read existing auth file: %w", err)
+	}
+	if errWrite := os.WriteFile(staging, data, 0o600); errWrite != nil {
+		return fmt.Errorf("write temp auth file: %w", errWrite)
+	}
+	return nil
+}
+
+// removeStagedCredential removes a Save's staging file and the Codex per-file lock file a staged Codex write
+// leaves beside it, so a refused save leaves the auth directory exactly as it found it.
+func removeStagedCredential(staging string) {
+	_ = os.Remove(staging)
+	_ = os.Remove(staging + ".lock")
+}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -34,7 +35,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 	if errBindJSON != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errBindJSON, http.StatusBadRequest), gin.H{"status": "error", "error": "invalid body"})
 		return
 	}
 	h.handleOAuthCallback(c, req)
